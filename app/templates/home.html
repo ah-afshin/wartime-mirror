@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Services</h2>
+{% for s in services %}
+  {% if s.home_endpoint %}
+  <a class="card" href="{{ url_for(s.home_endpoint) }}"><strong>{{ s.title }}</strong><br><small>{{ s.description }}</small></a>
+  {% else %}
+  <div class="card"><strong>{{ s.title }}</strong><br><small>{{ s.description }}</small></div>
+  {% endif %}
+{% else %}
+  <p class="muted">No services enabled.</p>
+{% endfor %}
+{% endblock %}

@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}Diagnostics{% endblock %}
+{% block content %}
+<h2>Outbound reachability</h2>
+<p class="muted">Which hosts this server can reach (cached for 60 s).</p>
+<table>
+  <tr><th>Site</th><th>Result</th><th>ms</th></tr>
+  {% for r in results %}
+  <tr>
+    <td>{{ r.label }}<br><small class="muted">{{ r.host }}</small></td>
+    <td>{% if r.reachable %}<span class="ok">reachable (HTTP {{ r.status }})</span>
+        {% else %}<span class="err">blocked / failed</span><br><small class="muted">{{ r.error }}</small>{% endif %}</td>
+    <td>{{ r.ms }}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% endblock %}
