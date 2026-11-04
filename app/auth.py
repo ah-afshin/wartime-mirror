@@ -4,19 +4,55 @@ from __future__ import annotations
 
 import hmac
 import secrets
+import unicodedata
 
 from flask import (Blueprint, abort, current_app, jsonify, redirect, render_template,
                    request, session, url_for)
-from werkzeug.security import check_password_hash
+from sqlalchemy import select
+from werkzeug.security import check_password_hash, generate_password_hash
+
+from app.models import User
 
 bp = Blueprint("auth", __name__)
 
 PUBLIC_ENDPOINTS = {"auth.login", "main.healthz", "static"}
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+_DUMMY_PASSWORD_HASH = generate_password_hash(secrets.token_urlsafe(32))
 
 
 def _ctx():
     return current_app.extensions["mirror"]
+
+
+def normalize_username(username: str) -> str:
+    return unicodedata.normalize("NFKC", username).strip().casefold()
+
+
+def validate_username(username: str) -> str:
+    normalized = normalize_username(username)
+    if (not normalized or len(normalized) > 255
+            or any(unicodedata.category(char) == "Cc" for char in normalized)):
+        raise ValueError("Username must contain 1 to 255 non-control characters.")
+    return normalized
+
+
+def get_current_user() -> User | None:
+    """Return the active database user identified by this browser session."""
+    user_id = session.get("user_id")
+    if type(user_id) is not int or user_id < 1:
+        session.pop("user_id", None)
+        session.pop("auth", None)
+        return None
+
+    with _ctx().database.session_scope() as db_session:
+        user = db_session.get(User, user_id)
+        if user is not None and not user.is_active:
+            user = None
+
+    if user is None:
+        session.pop("user_id", None)
+        session.pop("auth", None)
+    return user
 
 
 def csrf_token() -> str:
@@ -49,7 +85,9 @@ def _safe_next(nxt: str | None) -> str:
 def enforce_access():
     """before_request hook: CSRF for browser sessions, then default-deny auth."""
     bearer = _bearer_ok()
-    authenticated = bearer or session.get("auth") is True
+    session.pop("auth", None)
+    user = get_current_user()
+    authenticated = bearer or user is not None
     if (request.path.startswith("/api/") and request.endpoint is not None
             and request.endpoint not in PUBLIC_ENDPOINTS
             and not authenticated):
@@ -72,15 +110,27 @@ def login():
         if ctx.login_limiter.blocked(key):
             error, status = "Too many failed attempts. Try again later.", 429
         else:
-            pw = request.form.get("password", "")
-            if ctx.config.password_hash and check_password_hash(ctx.config.password_hash, pw):
+            username = normalize_username(request.form.get("username", ""))
+            password = request.form.get("password", "")
+            user = None
+            if username and len(username) <= 255:
+                with ctx.database.session_scope() as db_session:
+                    user = db_session.scalar(
+                        select(User).where(User.username == username)
+                    )
+            checked_password = password if len(password) <= 1024 else ""
+            password_matches = check_password_hash(
+                user.password_hash if user is not None else _DUMMY_PASSWORD_HASH,
+                checked_password,
+            )
+            if user is not None and user.is_active and password_matches:
                 ctx.login_limiter.reset(key)
                 session.clear()
-                session["auth"] = True
+                session["user_id"] = user.id
                 session.permanent = True
                 return redirect(_safe_next(nxt))
             ctx.login_limiter.fail(key)
-            error, status = "Wrong password.", 401
+            error, status = "Invalid username or password.", 401
     return render_template("login.html", error=error, next=nxt), status
 
 

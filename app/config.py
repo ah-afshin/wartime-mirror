@@ -29,7 +29,6 @@ def _default_database_url() -> str:
 class Config:
     env: str = "development"
     secret_key: str = ""
-    password_hash: str = ""
     api_token: str = ""
     enabled_services: tuple[str, ...] = ()  # empty = all discovered services
     trust_proxy: bool = True
@@ -61,7 +60,6 @@ class Config:
         cfg = cls(
             env=env,
             secret_key=secret,
-            password_hash=e("ACCESS_PASSWORD_HASH", ""),
             api_token=e("API_TOKEN", ""),
             enabled_services=_csv(e("ENABLED_SERVICES", "")),
             trust_proxy=_flag(e("TRUST_PROXY"), True),
@@ -83,8 +81,6 @@ class Config:
 
     def validate(self) -> None:
         problems = []
-        if not self.password_hash and not self.api_token:
-            problems.append("set ACCESS_PASSWORD_HASH and/or API_TOKEN (otherwise the app would be open to everyone)")
         if self.is_production and len(self.secret_key) < 32:
             problems.append("SECRET_KEY must be at least 32 characters in production")
         if (not math.isfinite(self.ai_timeout) or self.ai_timeout <= 0

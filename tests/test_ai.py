@@ -5,7 +5,6 @@ from dataclasses import replace
 from unittest.mock import patch
 
 import requests
-from werkzeug.security import generate_password_hash
 
 from app import create_app
 from app.config import Config
@@ -29,8 +28,7 @@ BASE_URLS = {
 
 
 def make_app():
-    config = Config(env="testing", secret_key="s" * 40,
-                    password_hash=generate_password_hash("password"), api_token=TOKEN)
+    config = Config(env="testing", secret_key="s" * 40, api_token=TOKEN)
     app = create_app(config)
     app.testing = True
     return app

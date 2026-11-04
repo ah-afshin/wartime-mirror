@@ -1,7 +1,7 @@
 # Wartime Mirror
 
 Small Flask app that relays requests to useful services from a server outside Iran.
-It uses default-deny authentication: browser sessions or the configured Bearer token
+It uses default-deny authentication: per-user browser sessions or the configured `API_TOKEN`
 are required for private pages and APIs.
 
 ## Endpoints
@@ -21,10 +21,20 @@ supported.
 
 ## Authentication
 
-Configure at least one of:
+Browser users sign in with a username and password stored in the `users` table.
+Passwords are stored as Werkzeug password hashes. Public registration is disabled;
+create accounts from the authorized server CLI:
 
-- `ACCESS_PASSWORD_HASH` for the browser login, generated with `python tools/make_hash.py`.
-- `API_TOKEN` for API clients, sent as `Authorization: Bearer <API_TOKEN>`.
+```bash
+flask --app wsgi create-user
+```
+
+The command prompts for a username and hidden password confirmation. Usernames are
+trimmed, Unicode-normalized, and case-insensitive. Run `alembic upgrade head` before
+creating the first account. Additional accounts are provisioned with the same command.
+
+`API_TOKEN` remains the independent shared credential for external API clients, sent as
+`Authorization: Bearer <token>`. It does not create or identify browser users.
 
 The AI routes require authentication. Do not send provider keys from clients; keys are
 configured on the server and are never included in gateway responses.
@@ -34,7 +44,7 @@ configured on the server and are never included in gateway responses.
 - `app/core/` — shared HTTP client, cache, security, errors, and rate limiting.
 - `app/services/` — feature logic, including the AI provider adapters.
 - `app/routes/` — matching Flask blueprints for each service.
-- `app/auth.py` — browser login, CSRF, Bearer token, and default-deny access control.
+- `app/auth.py` — per-user browser login, CSRF, API bearer authentication, and default-deny access control.
 - `app/registry.py` — service and route auto-discovery.
 
 ## Adding a service
@@ -121,9 +131,9 @@ starting the application with `alembic upgrade head`.
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-python tools/make_hash.py
 Copy-Item .env.example .env
 alembic upgrade head
+flask --app wsgi create-user
 flask --app wsgi run --debug
 python -m unittest discover -v
 ```
@@ -131,8 +141,8 @@ python -m unittest discover -v
 On macOS/Linux, activate with `source .venv/bin/activate` and copy the sample
 environment file with `cp .env.example .env`.
 
-Set `APP_ENV=development`, `SECRET_KEY`, `ACCESS_PASSWORD_HASH` and/or `API_TOKEN`,
-and provider keys in `.env`. Never commit `.env` or real credentials. `AI_TIMEOUT`
+Set `APP_ENV=development`, `SECRET_KEY`, optional `API_TOKEN`, and provider keys in
+`.env`. Never commit `.env` or real credentials. `AI_TIMEOUT`
 defaults to 60 seconds and `AI_MAX_RESPONSE_BYTES` to 5,000,000. Streaming defaults
 to a 240-second generation limit and a 30-second provider idle timeout
 (`AI_STREAM_TIMEOUT` and `AI_STREAM_IDLE_TIMEOUT`).
@@ -144,10 +154,9 @@ stalled read.
 1. Upload or clone the repository into your PythonAnywhere account.
 2. Create and activate a virtualenv using the Python version selected for the web app;
    install dependencies with `pip install -r requirements.txt`.
-3. Generate an access password hash with `python tools/make_hash.py`.
-4. In the **Web** tab, create or configure the Flask WSGI application and set its
+3. In the **Web** tab, create or configure the Flask WSGI application and set its
    virtualenv path.
-5. In the WSGI configuration file, set the project path and required environment
+4. In the WSGI configuration file, set the project path and required environment
    variables before importing the app. For example, replace the placeholders and add
    the provider keys you actually use:
 
@@ -161,7 +170,6 @@ stalled read.
 
    os.environ["APP_ENV"] = "production"
    os.environ["SECRET_KEY"] = "replace-with-a-random-value-of-at-least-32-characters"
-   os.environ["ACCESS_PASSWORD_HASH"] = "replace-with-generated-password-hash"
    os.environ["API_TOKEN"] = "replace-with-a-long-random-api-token"
    os.environ["DATABASE_URL"] = "sqlite:////home/yourusername/.local/share/wartime-mirror.sqlite3"
    os.environ["GROQ_API_KEY"] = "optional-provider-key"
@@ -176,11 +184,30 @@ stalled read.
    and `DATABASE_URL` configured. Keep the SQLite database on persistent storage
    outside temporary or deployment-replaced directories; the parent directory is
    created automatically.
-6. For streaming, optionally set `AI_STREAM_TIMEOUT` (default 240 seconds) and
+5. In a PythonAnywhere **Bash console**, activate the same virtualenv and make the
+   production `SECRET_KEY` and exact `DATABASE_URL` from the WSGI configuration
+   available to the command (for example, source a private shell-only environment
+   file kept outside the repository). Then run this exact command from the project
+   directory:
+
+   ```bash
+   flask --app wsgi create-user
+   ```
+
+   Enter the owner's existing browser password if it is known and desired, or choose
+   a new one. The password is prompted interactively and is not a command-line
+   argument. Repeat the command to provision additional users. Old shared-password
+   sessions are not migrated and must sign in again.
+6. After provisioning the first account, remove the obsolete
+   `ACCESS_PASSWORD_HASH` setting from the WSGI configuration or `.env`. The application no
+   longer reads it. Keep `API_TOKEN` if external API clients use it; it remains
+   independent of browser accounts.
+7. For streaming, optionally set `AI_STREAM_TIMEOUT` (default 240 seconds) and
    `AI_STREAM_IDLE_TIMEOUT` (default 30 seconds) in the WSGI environment. Keep the
    stream lifetime below PythonAnywhere's documented web-worker timeout.
-7. Save, reload the web app, log in or authenticate with the Bearer token, then request
-   `/api/ai/v1/models` to verify provider discovery. PythonAnywhere plan/network
+8. Save and reload the web app, then verify the new username/password login. Log in
+   with the new account and request `/api/ai/v1/models` to verify provider discovery.
+   PythonAnywhere plan/network
    restrictions may prevent outbound connections to one or more official provider
    endpoints.
 

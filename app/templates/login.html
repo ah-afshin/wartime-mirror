@@ -6,7 +6,8 @@
 <form method="post">
   <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
   <input type="hidden" name="next" value="{{ next }}">
-  <input type="password" name="password" placeholder="Password" autocomplete="current-password" autofocus required>
+  <input type="text" name="username" placeholder="Username" autocomplete="username" autofocus required>
+  <input type="password" name="password" placeholder="Password" autocomplete="current-password" required>
   <button type="submit">Enter</button>
 </form>
 {% endblock %}
