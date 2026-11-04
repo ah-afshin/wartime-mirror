@@ -4,6 +4,9 @@
 body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.6 system-ui,-apple-system,"Segoe UI",Tahoma,sans-serif}
 header{display:flex;justify-content:space-between;align-items:center;padding:.7rem 1rem;border-bottom:1px solid var(--line)}
 header a{color:var(--fg);text-decoration:none;font-weight:600}
+.site-links{margin-inline-start:auto;margin-inline-end:1rem}
+.site-links a{padding:.35rem .7rem;border-radius:8px}
+.site-links a:hover{background:var(--card)}
 main{max-width:46rem;margin:0 auto;padding:1rem}
 .card{display:block;background:var(--card);border-radius:12px;padding:1rem;margin:.7rem 0;color:inherit;text-decoration:none}
 .card small,.muted{color:var(--muted)}

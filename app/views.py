@@ -12,6 +12,11 @@ def home():
     return render_template("home.html", services=list(_services().values()))
 
 
+@bp.get("/chat")
+def chat():
+    return render_template("chat.html")
+
+
 @bp.get("/api/services")
 def api_services():
     return jsonify(services=[{"name": s.name, "title": s.title, "description": s.description}

@@ -51,9 +51,20 @@ class AuthTests(unittest.TestCase):
         r = self.c.get("/")
         self.assertEqual(r.status_code, 302)
         self.assertIn("/login", r.headers["Location"])
+        chat = self.c.get("/chat")
+        self.assertEqual(chat.status_code, 302)
+        self.assertIn("/login", chat.headers["Location"])
         r = self.c.get("/api/services")
         self.assertEqual(r.status_code, 401)
         self.assertEqual(r.get_json()["status"], 401)
+
+    def test_chat_page_uses_authenticated_template_and_csrf_token(self):
+        login(self.c)
+        response = self.c.get("/chat")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b'name="csrf-token"', response.data)
+        self.assertIn(b"/api/ai/v1/models", response.data)
+        self.assertIn(b"Open Mirror Chat", self.c.get("/").data)
 
     def test_bearer_token(self):
         ok = self.c.get("/api/services", headers={"Authorization": f"Bearer {TOKEN}"})

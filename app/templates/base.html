@@ -3,12 +3,19 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="csrf-token" content="{{ csrf_token() }}">
 <title>{% block title %}Mirror{% endblock %}</title>
 <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+{% block head %}{% endblock %}
 </head>
-<body>
+<body class="{% block body_class %}{% endblock %}">
 <header>
   <a href="{{ url_for('main.home') }}">Mirror</a>
+  {% if logged_in %}
+  <nav class="site-links" aria-label="Main navigation">
+    <a href="{{ url_for('main.chat') }}">Chat</a>
+  </nav>
+  {% endif %}
   {% if logged_in %}
   <form method="post" action="{{ url_for('auth.logout') }}">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
@@ -16,6 +23,6 @@
   </form>
   {% endif %}
 </header>
-<main>{% block content %}{% endblock %}</main>
+<main class="{% block main_class %}{% endblock %}">{% block content %}{% endblock %}</main>
 </body>
 </html>

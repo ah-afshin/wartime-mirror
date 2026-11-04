@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% block content %}
+<p><a class="card" href="{{ url_for('main.chat') }}"><strong>Open Mirror Chat</strong><br><small>Start a conversation with an available AI model.</small></a></p>
 <h2>Services</h2>
 {% for s in services %}
   {% if s.home_endpoint %}

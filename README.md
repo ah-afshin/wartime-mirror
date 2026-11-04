@@ -10,6 +10,7 @@ are required for private pages and APIs.
 - `GET /api/services` — authenticated list of enabled services.
 - `GET /api/diagnostics/outbound` — authenticated outbound connectivity diagnostics.
 - `GET /diagnostics` — diagnostics page for logged-in browser sessions.
+- `GET /chat` — authenticated browser chat interface.
 - `GET /api/ai/v1/conversations` — list the logged-in browser user's conversations.
 - `POST /api/ai/v1/conversations` — create a conversation.
 - `GET`, `PATCH`, `DELETE /api/ai/v1/conversations/<id>` — retrieve, update, or delete an owned conversation.
@@ -58,7 +59,10 @@ database IDs. Message generation accepts JSON `{"content": "..."}`; it persists 
 user message before calling the existing AI service with the conversation's selected
 model and stored history. If generation fails, the user message remains saved and no
 assistant message is created. The first message also sets a short title from its text.
-Generation is non-streaming; frontend chat UI is not implemented here.
+Generation is non-streaming. The authenticated `/chat` browser interface discovers models
+from the backend and uses the conversation endpoints for all persistent history and model
+changes. User and assistant text is stored raw; the browser renders Markdown by creating
+DOM text and formatting nodes rather than interpreting message content as HTML.
 
 ## Layout
 
@@ -168,7 +172,8 @@ defaults to 60 seconds and `AI_MAX_RESPONSE_BYTES` to 5,000,000. Streaming defau
 to a 240-second generation limit and a 30-second provider idle timeout
 (`AI_STREAM_TIMEOUT` and `AI_STREAM_IDLE_TIMEOUT`).
 The generation deadline is checked between upstream reads; the idle timeout bounds a
-stalled read.
+stalled read. Start the app with `flask --app wsgi run --debug`, sign in, and open
+`http://127.0.0.1:5000/chat`.
 
 ## PythonAnywhere deployment
 
@@ -227,7 +232,8 @@ stalled read.
    `AI_STREAM_IDLE_TIMEOUT` (default 30 seconds) in the WSGI environment. Keep the
    stream lifetime below PythonAnywhere's documented web-worker timeout.
 8. Save and reload the web app, then verify the new username/password login. Log in
-   with the new account and request `/api/ai/v1/models` to verify provider discovery.
+   with the new account, request `/api/ai/v1/models` to verify provider discovery, and
+   open `https://YOUR-DOMAIN/chat`.
    PythonAnywhere plan/network
    restrictions may prevent outbound connections to one or more official provider
    endpoints.
