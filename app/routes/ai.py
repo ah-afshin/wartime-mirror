@@ -1,4 +1,4 @@
-from flask import Blueprint, current_app, jsonify, request
+from flask import Blueprint, Response, current_app, jsonify, request
 
 from app.core.ratelimit import RequestLimiter
 from app.services.ai import AIError
@@ -39,6 +39,13 @@ def chat_completions():
         return limited
     try:
         payload = request.get_json(silent=True)
+        if isinstance(payload, dict) and payload.get("stream") is True:
+            stream = _service().stream(payload)
+            response = Response(stream, mimetype="text/event-stream")
+            response.headers["Cache-Control"] = "no-cache, no-transform"
+            response.headers["X-Accel-Buffering"] = "no"
+            response.headers["Connection"] = "keep-alive"
+            return response
         return jsonify(_service().complete(payload))
     except AIError as error:
         return _ai_error(error)

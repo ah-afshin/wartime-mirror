@@ -1,12 +1,15 @@
 """Authenticated, provider-specific AI gateway adapters."""
 from __future__ import annotations
 
+import json
 import re
 import time
 import uuid
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote
+
+import requests
 
 from app.core.errors import ServiceError
 from app.services.base import Service
@@ -30,6 +33,119 @@ class AIError(Exception):
         self.status = status
         self.code = code
         self.error_type = error_type
+
+
+class AIStreamFailure(Exception):
+    def __init__(self, message: str, code: str, error_type: str = "server_error"):
+        super().__init__(message)
+        self.message = message
+        self.code = code
+        self.error_type = error_type
+
+
+def _sse_data(data: Any) -> str:
+    return f"data: {json.dumps(data, ensure_ascii=False, separators=(',', ':'))}\n\n"
+
+
+def _is_read_timeout(error: BaseException) -> bool:
+    pending = [error]
+    seen = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, requests.Timeout) or "timed out" in str(current).lower():
+            return True
+        if current.__cause__ is not None:
+            pending.append(current.__cause__)
+        if current.__context__ is not None:
+            pending.append(current.__context__)
+        pending.extend(arg for arg in current.args if isinstance(arg, BaseException))
+    return False
+
+
+def _usage_counts(usage: Any, fields: tuple[str, str, str]) -> dict[str, int] | None:
+    if not isinstance(usage, dict):
+        return None
+    counts = []
+    for field in fields:
+        value = usage.get(field, 0)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise AIStreamFailure("The AI provider returned a malformed response",
+                                  "malformed_upstream_response")
+        counts.append(value)
+    return dict(zip(("prompt_tokens", "completion_tokens", "total_tokens"), counts))
+
+
+def _read_sse_events(response, *, max_bytes: int, deadline: float):
+    buffer = bytearray()
+    data_lines: list[bytes] = []
+    event_size = 0
+    total_size = 0
+
+    def parse_line(line: bytes) -> str | None:
+        nonlocal event_size
+        if line.endswith(b"\r"):
+            line = line[:-1]
+        if not line:
+            event = b"\n".join(data_lines) if data_lines else None
+            data_lines.clear()
+            event_size = 0
+            if event is None:
+                return None
+            try:
+                return event.decode("utf-8")
+            except UnicodeDecodeError:
+                raise AIStreamFailure("The AI provider returned a malformed event",
+                                      "malformed_upstream_response") from None
+        if line.startswith(b":"):
+            return None
+        field, separator, value = line.partition(b":")
+        if field == b"data":
+            if separator and value.startswith(b" "):
+                value = value[1:]
+            event_size += len(value) + 1
+            if event_size > max_bytes:
+                raise AIStreamFailure("The AI provider response was too large",
+                                      "upstream_response_too_large")
+            data_lines.append(value)
+        return None
+
+    for chunk in response.iter_content(chunk_size=4096, decode_unicode=False):
+        if time.monotonic() > deadline:
+            raise AIStreamFailure("The AI provider timed out", "upstream_timeout", "timeout")
+        if not chunk:
+            continue
+        total_size += len(chunk)
+        if total_size > max_bytes:
+            raise AIStreamFailure("The AI provider response was too large",
+                                  "upstream_response_too_large")
+        buffer.extend(chunk)
+        if len(buffer) > max_bytes:
+            raise AIStreamFailure("The AI provider response was too large",
+                                  "upstream_response_too_large")
+        while True:
+            newline = buffer.find(b"\n")
+            if newline < 0:
+                break
+            line = bytes(buffer[:newline])
+            del buffer[:newline + 1]
+            event = parse_line(line)
+            if event is not None:
+                if time.monotonic() > deadline:
+                    raise AIStreamFailure("The AI provider timed out", "upstream_timeout", "timeout")
+                yield event
+    if buffer:
+        event = parse_line(bytes(buffer))
+        if event is not None:
+            yield event
+    if data_lines:
+        try:
+            yield b"\n".join(data_lines).decode("utf-8")
+        except UnicodeDecodeError:
+            raise AIStreamFailure("The AI provider returned a malformed event",
+                                  "malformed_upstream_response") from None
 
 
 @dataclass(frozen=True)
@@ -67,7 +183,34 @@ class ProviderAdapter:
                 raise AIError("The AI provider timed out", 504, "upstream_timeout", "timeout") from None
             raise AIError("The AI provider is unavailable", 503, "provider_unavailable", "server_error") from None
 
-    def _check_status(self, response, *, discovery: bool = False) -> None:
+    def _open_stream(self, url: str, *, key: str, payload: dict[str, Any],
+                     params: dict[str, str] | None = None):
+        try:
+            response = self.service.http.open_stream(
+                "POST", url, headers={**self.headers(key), "Accept": "text/event-stream"},
+                json=payload,
+                params=params,
+                timeout=(min(self.service.config.ai_timeout, 10.0),
+                         self.service.config.ai_stream_idle_timeout),
+                allow_redirects=False,
+            )
+        except ServiceError as exc:
+            if exc.status == 504 or "Timeout" in (exc.detail or ""):
+                raise AIError("The AI provider timed out", 504, "upstream_timeout", "timeout") from None
+            raise AIError("The AI provider is unavailable", 503, "provider_unavailable", "server_error") from None
+        try:
+            self._check_status(response, inspect_error_body=False)
+            content_type = response.headers.get("Content-Type", "")
+            if "text/event-stream" not in content_type.lower():
+                raise AIError("The AI provider returned an invalid streaming response", 502,
+                              "malformed_upstream_response", "server_error")
+            return response
+        except AIError:
+            response.close()
+            raise
+
+    def _check_status(self, response, *, discovery: bool = False,
+                      inspect_error_body: bool = True) -> None:
         status = response.status_code
         if 200 <= status < 300:
             return
@@ -81,7 +224,7 @@ class ProviderAdapter:
         if status in (408, 504):
             raise AIError("The AI provider timed out", 504, "upstream_timeout", "timeout")
         if status == 400:
-            if not discovery:
+            if not discovery and inspect_error_body:
                 try:
                     body = response.json()
                     error = body.get("error", {}) if isinstance(body, dict) else {}
@@ -108,20 +251,82 @@ class ProviderAdapter:
                           "malformed_upstream_response", "server_error")
         return data
 
+    def stream_chunks(self, response, model: str):
+        def generate():
+            stream_id = f"chatcmpl-{uuid.uuid4().hex}"
+            created = int(time.time())
+            deadline = time.monotonic() + self.service.config.ai_stream_timeout
+            saw_done = False
+            saw_terminal = False
+            try:
+                for event in _read_sse_events(
+                        response, max_bytes=self.service.config.ai_max_response_bytes,
+                        deadline=deadline):
+                    if event.strip() == "[DONE]":
+                        saw_done = True
+                        yield "data: [DONE]\n\n"
+                        return
+                    try:
+                        data = json.loads(event)
+                    except (ValueError, TypeError):
+                        raise AIStreamFailure("The AI provider returned a malformed event",
+                                              "malformed_upstream_response") from None
+                    if not isinstance(data, dict):
+                        raise AIStreamFailure("The AI provider returned a malformed event",
+                                              "malformed_upstream_response")
+                    if "error" in data:
+                        raise AIStreamFailure("The AI provider could not complete the request",
+                                              "provider_unavailable")
+                    for chunk in self.normalize_stream_event(data, model, stream_id, created):
+                        if any(choice.get("finish_reason") is not None
+                               for choice in chunk.get("choices", [])):
+                            saw_terminal = True
+                        yield _sse_data(chunk)
+                if ((self.requires_done and not saw_done)
+                        or (not self.requires_done and not saw_terminal)):
+                    yield _sse_data({"error": {
+                        "message": "The AI provider ended the stream unexpectedly",
+                        "type": "server_error", "param": None, "code": "upstream_disconnected",
+                    }})
+                yield "data: [DONE]\n\n"
+            except AIStreamFailure as exc:
+                yield _sse_data({"error": {
+                    "message": exc.message, "type": exc.error_type,
+                    "param": None, "code": exc.code,
+                }})
+                yield "data: [DONE]\n\n"
+            except requests.Timeout:
+                yield _sse_data({"error": {
+                    "message": "The AI provider timed out", "type": "timeout",
+                    "param": None, "code": "upstream_timeout",
+                }})
+                yield "data: [DONE]\n\n"
+            except requests.RequestException as exc:
+                timed_out = _is_read_timeout(exc)
+                yield _sse_data({"error": {
+                    "message": "The AI provider timed out" if timed_out
+                    else "The AI provider disconnected",
+                    "type": "timeout" if timed_out else "server_error",
+                    "param": None,
+                    "code": "upstream_timeout" if timed_out else "upstream_disconnected",
+                }})
+                yield "data: [DONE]\n\n"
+            finally:
+                response.close()
+        return generate()
+
+    requires_done = True
+
+    def normalize_stream_event(self, data: dict[str, Any], model: str,
+                               stream_id: str, created: int) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
 
 class OpenAICompatibleAdapter(ProviderAdapter):
     def complete(self, model: str, payload: dict[str, Any], key: str) -> dict[str, Any]:
-        outgoing = {
-            "model": model,
-            "messages": payload["messages"],
-        }
-        for field in ("temperature", "top_p", "stop", "frequency_penalty", "presence_penalty", "seed"):
-            if field in payload:
-                outgoing[field] = payload[field]
-        if "max_completion_tokens" in payload:
-            outgoing["max_tokens"] = payload["max_completion_tokens"]
-        elif "max_tokens" in payload:
-            outgoing["max_tokens"] = payload["max_tokens"]
+        if payload.get("stream"):
+            raise AIError("Use the streaming adapter method", 400, "invalid_request", "invalid_request_error")
+        outgoing = self.request_payload(model, payload)
         response = self._request("POST", f"{self.provider.base_url}/chat/completions",
                                  key=key, payload=outgoing)
         self._check_status(response)
@@ -152,6 +357,73 @@ class OpenAICompatibleAdapter(ProviderAdapter):
         data["choices"] = normalized_choices
         return self.service.openai_response(data, f"{self.provider.name}/{model}")
 
+    @staticmethod
+    def request_payload(model: str, payload: dict[str, Any]) -> dict[str, Any]:
+        outgoing = {"model": model, "messages": payload["messages"]}
+        for field in ("temperature", "top_p", "stop", "frequency_penalty", "presence_penalty", "seed"):
+            if field in payload:
+                outgoing[field] = payload[field]
+        if "max_completion_tokens" in payload:
+            outgoing["max_tokens"] = payload["max_completion_tokens"]
+        elif "max_tokens" in payload:
+            outgoing["max_tokens"] = payload["max_tokens"]
+        return outgoing
+
+    def stream(self, model: str, payload: dict[str, Any], key: str):
+        outgoing = self.request_payload(model, payload)
+        outgoing["stream"] = True
+        if payload.get("stream_options", {}).get("include_usage"):
+            outgoing["stream_options"] = {"include_usage": True}
+        response = self._open_stream(f"{self.provider.base_url}/chat/completions",
+                                     key=key, payload=outgoing)
+        return self.stream_chunks(response, f"{self.provider.name}/{model}")
+
+    def normalize_stream_event(self, data: dict[str, Any], model: str,
+                               stream_id: str, created: int) -> list[dict[str, Any]]:
+        choices = data.get("choices")
+        if not isinstance(choices, list):
+            raise AIStreamFailure("The AI provider returned a malformed event",
+                                  "malformed_upstream_response")
+        normalized = []
+        for choice in choices:
+            if not isinstance(choice, dict):
+                raise AIStreamFailure("The AI provider returned a malformed event",
+                                      "malformed_upstream_response")
+            index = choice.get("index")
+            delta = choice.get("delta")
+            finish = choice.get("finish_reason")
+            if (isinstance(index, bool) or not isinstance(index, int)
+                    or not isinstance(delta, dict)
+                    or finish is not None and not isinstance(finish, str)):
+                raise AIStreamFailure("The AI provider returned a malformed event",
+                                      "malformed_upstream_response")
+            role = delta.get("role")
+            content = delta.get("content")
+            if role is not None and role != "assistant":
+                raise AIStreamFailure("The AI provider returned a malformed event",
+                                      "malformed_upstream_response")
+            if content is not None and not isinstance(content, str):
+                raise AIStreamFailure("The AI provider returned a malformed event",
+                                      "malformed_upstream_response")
+            out_delta = {}
+            if role is not None:
+                out_delta["role"] = "assistant"
+            if content is not None:
+                out_delta["content"] = content
+            normalized.append({
+                "id": stream_id, "object": "chat.completion.chunk", "created": created,
+                "model": model, "choices": [{"index": index, "delta": out_delta,
+                                               "finish_reason": finish}],
+            })
+        usage = data.get("usage")
+        if usage is not None:
+            counts = _usage_counts(usage, ("prompt_tokens", "completion_tokens", "total_tokens"))
+            normalized.append({
+                "id": stream_id, "object": "chat.completion.chunk", "created": created,
+                "model": model, "choices": [], "usage": counts,
+            })
+        return normalized
+
     def list_models(self, key: str) -> list[str]:
         response = self._request("GET", f"{self.provider.base_url}/models", key=key)
         self._check_status(response, discovery=True)
@@ -166,6 +438,8 @@ class OpenAICompatibleAdapter(ProviderAdapter):
 
 
 class GeminiAdapter(ProviderAdapter):
+    requires_done = False
+
     def headers(self, key: str) -> dict[str, str]:
         return {"x-goog-api-key": key, "Content-Type": "application/json"}
 
@@ -232,6 +506,99 @@ class GeminiAdapter(ProviderAdapter):
             "usage": dict(zip(("prompt_tokens", "completion_tokens", "total_tokens"), usage_counts)),
         }
         return response_data
+
+    def stream(self, model: str, payload: dict[str, Any], key: str):
+        contents = []
+        system_parts = []
+        for message in payload["messages"]:
+            text = self.service.message_text(message["content"])
+            if message["role"] == "system":
+                system_parts.append({"text": text})
+            else:
+                role = "model" if message["role"] == "assistant" else "user"
+                contents.append({"role": role, "parts": [{"text": text}]})
+        if not any(item["role"] == "user" for item in contents):
+            raise AIError("Gemini requests require at least one user message", 400,
+                          "invalid_request", "invalid_request_error")
+        outgoing: dict[str, Any] = {"contents": contents}
+        if system_parts:
+            outgoing["system_instruction"] = {"parts": system_parts}
+        generation: dict[str, Any] = {}
+        for source, target in (("temperature", "temperature"), ("top_p", "topP")):
+            if source in payload:
+                generation[target] = payload[source]
+        if "max_completion_tokens" in payload:
+            generation["maxOutputTokens"] = payload["max_completion_tokens"]
+        elif "max_tokens" in payload:
+            generation["maxOutputTokens"] = payload["max_tokens"]
+        if generation:
+            outgoing["generationConfig"] = generation
+        endpoint = f"{self.provider.base_url}/models/{quote(model, safe='')}:streamGenerateContent"
+        response = self._open_stream(endpoint, key=key, payload=outgoing, params={"alt": "sse"})
+        return self.stream_chunks(response, f"gemini/{model}")
+
+    def normalize_stream_event(self, data: dict[str, Any], model: str,
+                               stream_id: str, created: int) -> list[dict[str, Any]]:
+        candidates = data.get("candidates", [])
+        if not isinstance(candidates, list):
+            raise AIStreamFailure("The AI provider returned a malformed event",
+                                  "malformed_upstream_response")
+        chunks = []
+        for candidate in candidates:
+            candidate_index = candidate.get("index", 0) if isinstance(candidate, dict) else None
+            if (not isinstance(candidate, dict) or isinstance(candidate_index, bool)
+                    or not isinstance(candidate_index, int)):
+                raise AIStreamFailure("The AI provider returned a malformed event",
+                                      "malformed_upstream_response")
+            index = candidate_index
+            content = candidate.get("content", {})
+            if not isinstance(content, dict):
+                raise AIStreamFailure("The AI provider returned a malformed event",
+                                      "malformed_upstream_response")
+            role = content.get("role")
+            if role is not None and role != "model":
+                raise AIStreamFailure("The AI provider returned a malformed event",
+                                      "malformed_upstream_response")
+            parts = content.get("parts", [])
+            if not isinstance(parts, list):
+                raise AIStreamFailure("The AI provider returned a malformed event",
+                                      "malformed_upstream_response")
+            text = []
+            for part in parts:
+                if not isinstance(part, dict):
+                    raise AIStreamFailure("The AI provider returned a malformed event",
+                                          "malformed_upstream_response")
+                if "text" in part:
+                    if not isinstance(part["text"], str):
+                        raise AIStreamFailure("The AI provider returned a malformed event",
+                                              "malformed_upstream_response")
+                    text.append(part["text"])
+            finish_reason = candidate.get("finishReason")
+            if finish_reason is not None and not isinstance(finish_reason, str):
+                raise AIStreamFailure("The AI provider returned a malformed event",
+                                      "malformed_upstream_response")
+            if text or finish_reason is not None or role is not None:
+                delta: dict[str, str] = {}
+                if role is not None:
+                    delta["role"] = "assistant"
+                if text:
+                    delta["content"] = "".join(text)
+                finish_map = {"MAX_TOKENS": "length", "STOP": "stop", "SAFETY": "content_filter"}
+                chunks.append({
+                    "id": stream_id, "object": "chat.completion.chunk", "created": created,
+                    "model": model,
+                    "choices": [{"index": index, "delta": delta,
+                                 "finish_reason": finish_map.get(finish_reason, "stop")
+                                 if finish_reason else None}],
+                })
+        usage = data.get("usageMetadata")
+        if usage is not None:
+            counts = _usage_counts(usage, ("promptTokenCount", "candidatesTokenCount", "totalTokenCount"))
+            chunks.append({
+                "id": stream_id, "object": "chat.completion.chunk", "created": created,
+                "model": model, "choices": [], "usage": counts,
+            })
+        return chunks
 
     def list_models(self, key: str) -> list[str]:
         supported = []
@@ -309,8 +676,19 @@ class AIService(Service):
         if (not MODEL_PATTERN.fullmatch(model_id) or
                 provider_name == "gemini" and "/" in model_id):
             raise AIError("The model identifier is invalid", 400, "invalid_request", "invalid_request_error")
-        if payload.get("stream", False):
-            raise AIError("Streaming is not supported yet", 400, "unsupported_streaming", "invalid_request_error")
+        stream = payload.get("stream", False)
+        if not isinstance(stream, bool):
+            raise AIError("stream must be a boolean", 400, "invalid_request", "invalid_request_error")
+        stream_options = payload.get("stream_options", {})
+        if not isinstance(stream_options, dict) or set(stream_options) - {"include_usage"}:
+            raise AIError("stream_options is invalid", 400, "invalid_request", "invalid_request_error")
+        if ("include_usage" in stream_options
+                and not isinstance(stream_options["include_usage"], bool)):
+            raise AIError("stream_options.include_usage must be a boolean", 400,
+                          "invalid_request", "invalid_request_error")
+        if stream_options and not stream:
+            raise AIError("stream_options requires stream=true", 400,
+                          "invalid_request", "invalid_request_error")
         messages = payload.get("messages")
         if not isinstance(messages, list) or not messages or len(messages) > MAX_MESSAGES:
             raise AIError("Messages must be a non-empty list of at most 100 items", 400,
@@ -359,7 +737,8 @@ class AIService(Service):
         if "seed" in payload and (isinstance(payload["seed"], bool) or not isinstance(payload["seed"], int)):
             raise AIError("seed must be an integer", 400, "invalid_request", "invalid_request_error")
         supported = {"model", "messages", "stream", "temperature", "top_p", "max_tokens",
-                     "max_completion_tokens", "stop", "frequency_penalty", "presence_penalty", "seed"}
+                     "max_completion_tokens", "stop", "frequency_penalty", "presence_penalty", "seed",
+                     "stream_options"}
         unsupported = set(payload) - supported
         if unsupported:
             field = sorted(unsupported)[0]
@@ -389,9 +768,23 @@ class AIService(Service):
 
     def complete(self, payload: Any) -> dict[str, Any]:
         provider_name, model_id = self.validate_request(payload)
+        if payload.get("stream", False):
+            raise AIError("Use the streaming method for stream=true", 400,
+                          "invalid_request", "invalid_request_error")
         provider = self.providers[provider_name]
         adapter = self.adapters[provider_name]
         return adapter.complete(model_id, payload, self.get_key(provider))
+
+    def stream(self, payload: Any):
+        provider_name, model_id = self.validate_request(payload)
+        if not payload.get("stream", False):
+            raise AIError("stream=true is required", 400, "invalid_request", "invalid_request_error")
+        provider = self.providers[provider_name]
+        adapter = self.adapters[provider_name]
+        if not isinstance(adapter, (OpenAICompatibleAdapter, GeminiAdapter)):
+            raise AIError("Streaming is not supported by this provider", 400,
+                          "unsupported_streaming", "invalid_request_error")
+        return adapter.stream(model_id, payload, self.get_key(provider))
 
     def models(self) -> dict[str, Any]:
         return self.cache.get_or_set("ai:models", self._discover_models, ttl=120)

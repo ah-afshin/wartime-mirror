@@ -22,6 +22,20 @@ class HttpClient:
         self._plain = requests.Session()  # no retries (fast-fail probes)
         self._plain.headers["User-Agent"] = user_agent
 
+    def open_stream(self, method: str, url: str, *, timeout: float | tuple[float, float],
+                    **kwargs) -> requests.Response:
+        """Return a live response for callers that consume it incrementally."""
+        try:
+            return self._plain.request(
+                method, url, timeout=timeout, stream=True, **kwargs,
+            )
+        except requests.Timeout as e:
+            raise ServiceError("Upstream timed out", 504, detail=type(e).__name__)
+        except requests.RequestException as e:
+            if "timed out" in str(e).lower():
+                raise ServiceError("Upstream timed out", 504, detail=type(e).__name__)
+            raise ServiceError("Upstream unreachable", 502, detail=type(e).__name__)
+
     def request(self, method: str, url: str, *, timeout: float | None = None,
                 max_bytes: int | None = None, retries: bool = True,
                 **kwargs) -> requests.Response:

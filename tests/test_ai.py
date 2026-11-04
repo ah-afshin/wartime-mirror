@@ -1,6 +1,7 @@
 import json
 import os
 import unittest
+from dataclasses import replace
 from unittest.mock import patch
 
 import requests
@@ -44,6 +45,23 @@ def response(status, payload):
     return result
 
 
+class StreamingResponse:
+    def __init__(self, chunks, status=200, content_type="text/event-stream"):
+        self.chunks = chunks
+        self.status_code = status
+        self.headers = {"Content-Type": content_type}
+        self.closed = False
+        self.yielded = 0
+
+    def iter_content(self, chunk_size, decode_unicode=False):
+        for chunk in self.chunks:
+            self.yielded += 1
+            yield chunk
+
+    def close(self):
+        self.closed = True
+
+
 def completion_response():
     return {
         "id": "chatcmpl-upstream",
@@ -81,10 +99,16 @@ class AIAuthTests(unittest.TestCase):
         self.assertEqual(get.get_json()["status"], 401)
 
     def test_ai_timeout_configuration_must_be_finite_and_positive(self):
-        for timeout in (0, -1, float("inf"), float("nan")):
-            with self.subTest(timeout=timeout):
-                config = Config(env="testing", secret_key="s" * 40, api_token=TOKEN,
-                                ai_timeout=timeout)
+        overrides = (
+            {"ai_timeout": 0}, {"ai_timeout": -1}, {"ai_timeout": float("inf")},
+            {"ai_timeout": float("nan")}, {"ai_stream_timeout": 0},
+            {"ai_stream_timeout": float("inf")}, {"ai_stream_idle_timeout": -1},
+            {"ai_stream_idle_timeout": float("nan")},
+        )
+        for values in overrides:
+            with self.subTest(values=values):
+                config = Config(env="testing", secret_key="s" * 40,
+                                api_token=TOKEN, **values)
                 with self.assertRaises(RuntimeError):
                     config.validate()
 
@@ -180,7 +204,7 @@ class AICompletionTests(unittest.TestCase):
                               json=chat_payload("groq/not a model"))
         self.assertEqual(invalid.status_code, 400)
 
-    def test_invalid_request_and_streaming_rejected_without_upstream_call(self):
+    def test_invalid_request_is_rejected_without_upstream_call(self):
         app = make_app()
         client = app.test_client()
         invalid = chat_payload("groq/model")
@@ -188,11 +212,17 @@ class AICompletionTests(unittest.TestCase):
         with patch.object(requests.Session, "request") as mocked:
             result = client.post("/api/ai/v1/chat/completions", headers=auth_headers(), json=invalid)
             self.assertEqual(result.status_code, 400)
-            self.assertEqual(client.post(
-                "/api/ai/v1/chat/completions", headers=auth_headers(),
-                json={**chat_payload("groq/model"), "stream": True},
-            ).status_code, 400)
             mocked.assert_not_called()
+
+    def test_invalid_stream_options_are_rejected(self):
+        client = make_app().test_client()
+        for options in ({"include_usage": "yes"}, {"unknown": True}):
+            with self.subTest(options=options):
+                result = client.post(
+                    "/api/ai/v1/chat/completions", headers=auth_headers(),
+                    json={**chat_payload("groq/model"), "stream": True, "stream_options": options},
+                )
+                self.assertEqual(result.status_code, 400)
 
     def test_unknown_model_and_upstream_status_errors_are_sanitized(self):
         app = make_app()
@@ -259,6 +289,263 @@ class AICompletionTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0][0], f"{BASE_URLS['groq']}/chat/completions")
         self.assertFalse(calls[0][1]["allow_redirects"])
+
+
+class AIStreamingTests(unittest.TestCase):
+    def test_openai_compatible_stream_headers_chunks_usage_and_done(self):
+        app = make_app()
+        key = KEYS["groq"][1]
+        events = [
+            {"id": "upstream-id", "model": "provider-model",
+             "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}]},
+            {"choices": [{"index": 0, "delta": {"content": "Hello "}, "finish_reason": None}]},
+            {"choices": [{"index": 0, "delta": {"content": "world"}, "finish_reason": None}]},
+            {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
+            {"choices": [], "usage": {"prompt_tokens": 2, "completion_tokens": 2, "total_tokens": 4}},
+        ]
+        upstream = StreamingResponse([
+            (f"data: {json.dumps(event)}\r\n\r\n").encode() for event in events
+        ] + [b"data: [DONE]\r\n\r\n"])
+        calls = []
+
+        def fake_request(method, url, **kwargs):
+            calls.append((method, url, kwargs))
+            return upstream
+
+        with patch.dict(os.environ, {"GROQ_API_KEY": key}), \
+                patch.object(requests.Session, "request", side_effect=fake_request):
+            result = app.test_client().post(
+                "/api/ai/v1/chat/completions", headers=auth_headers(),
+                json={**chat_payload("groq/model"), "stream": True,
+                      "stream_options": {"include_usage": True}},
+                buffered=False,
+            )
+            self.assertEqual(result.status_code, 200)
+            self.assertEqual(result.mimetype, "text/event-stream")
+            self.assertEqual(result.headers["Cache-Control"], "no-cache, no-transform")
+            self.assertEqual(result.headers["X-Accel-Buffering"], "no")
+            self.assertEqual(len(calls), 1)
+            method, url, kwargs = calls[0]
+            self.assertEqual(method, "POST")
+            self.assertEqual(url, f"{BASE_URLS['groq']}/chat/completions")
+            self.assertTrue(kwargs["stream"])
+            self.assertFalse(kwargs["allow_redirects"])
+            self.assertEqual(kwargs["json"]["stream"], True)
+            self.assertEqual(kwargs["json"]["stream_options"], {"include_usage": True})
+            body = b"".join(result.response).decode()
+            result.close()
+
+        chunks = [json.loads(line[6:]) for line in body.splitlines() if line.startswith("data: {")]
+        self.assertEqual([item["choices"][0]["delta"].get("content") for item in chunks[:3]],
+                         [None, "Hello ", "world"])
+        self.assertTrue(all(item["model"] == "groq/model" for item in chunks))
+        self.assertEqual(chunks[-1]["usage"]["total_tokens"], 4)
+        self.assertTrue(body.endswith("data: [DONE]\n\n"))
+        self.assertTrue(upstream.closed)
+        self.assertNotIn(key, body)
+
+    def test_stream_supports_each_openai_compatible_provider(self):
+        for provider in ("groq", "openrouter", "cerebras", "mistral"):
+            with self.subTest(provider=provider):
+                app = make_app()
+                env_name, key = KEYS[provider]
+                upstream = StreamingResponse([b'data: {"choices":[{"index":0,"delta":{"content":"x"},"finish_reason":null}]}\n\n',
+                                             b"data: [DONE]\n\n"])
+                calls = []
+
+                def fake_request(method, url, **kwargs):
+                    calls.append((method, url, kwargs))
+                    return upstream
+
+                with patch.dict(os.environ, {env_name: key}), \
+                        patch.object(requests.Session, "request", side_effect=fake_request):
+                    result = app.test_client().post(
+                        "/api/ai/v1/chat/completions", headers=auth_headers(),
+                        json={**chat_payload(f"{provider}/model"), "stream": True}, buffered=False,
+                    )
+                    self.assertEqual(result.status_code, 200)
+                    body = b"".join(result.response)
+                    result.close()
+                self.assertIn(b'"content":"x"', body)
+                self.assertEqual(calls[0][1], f"{BASE_URLS[provider]}/chat/completions")
+                self.assertEqual(calls[0][2]["headers"]["Authorization"], f"Bearer {key}")
+                self.assertTrue(upstream.closed)
+
+    def test_gemini_native_sse_stream_and_termination(self):
+        app = make_app()
+        key = KEYS["gemini"][1]
+        events = [
+            {"candidates": [{"index": 0, "content": {"role": "model", "parts": [{"text": "Hi"}]}}]},
+            {"candidates": [{"index": 0, "content": {"parts": [{"text": " there"}]},
+                             "finishReason": "STOP"}],
+             "usageMetadata": {"promptTokenCount": 3, "candidatesTokenCount": 2,
+                               "totalTokenCount": 5}},
+        ]
+        upstream = StreamingResponse([
+            (f"data: {json.dumps(event)}\n\n").encode() for event in events
+        ])
+        calls = []
+
+        def fake_request(method, url, **kwargs):
+            calls.append((method, url, kwargs))
+            return upstream
+
+        with patch.dict(os.environ, {"GEMINI_API_KEY": key}), \
+                patch.object(requests.Session, "request", side_effect=fake_request):
+            result = app.test_client().post(
+                "/api/ai/v1/chat/completions", headers=auth_headers(),
+                json={**chat_payload("gemini/gemini-verified"), "stream": True}, buffered=False,
+            )
+            body = b"".join(result.response).decode()
+            result.close()
+        self.assertIn(b'"content":"Hi"', body.encode())
+        self.assertIn(b'"content":" there"', body.encode())
+        self.assertIn(b'"total_tokens":5', body.encode())
+        self.assertTrue(body.endswith("data: [DONE]\n\n"))
+        self.assertEqual(calls[0][1],
+                         f"{BASE_URLS['gemini']}/models/gemini-verified:streamGenerateContent")
+        self.assertEqual(calls[0][2]["params"], {"alt": "sse"})
+        self.assertEqual(calls[0][2]["headers"]["x-goog-api-key"], key)
+        self.assertTrue(upstream.closed)
+
+    def test_gemini_stream_without_finish_reason_reports_disconnect(self):
+        app = make_app()
+        upstream = StreamingResponse([
+            b'data: {"candidates":[{"index":0,"content":{"parts":[{"text":"partial"}]}}]}\n\n',
+        ])
+        with patch.dict(os.environ, {"GEMINI_API_KEY": KEYS["gemini"][1]}), \
+                patch.object(requests.Session, "request", return_value=upstream):
+            result = app.test_client().post(
+                "/api/ai/v1/chat/completions", headers=auth_headers(),
+                json={**chat_payload("gemini/model"), "stream": True}, buffered=False,
+            )
+            body = b"".join(result.response).decode()
+            result.close()
+        self.assertIn('"code":"upstream_disconnected"', body)
+        self.assertTrue(body.endswith("data: [DONE]\n\n"))
+        self.assertTrue(upstream.closed)
+
+    def test_stream_auth_and_missing_key(self):
+        client = make_app().test_client()
+        unauthenticated = client.post(
+            "/api/ai/v1/chat/completions", json={**chat_payload("groq/model"), "stream": True},
+            buffered=False,
+        )
+        self.assertEqual(unauthenticated.status_code, 401)
+        with patch.dict(os.environ, {"GROQ_API_KEY": ""}):
+            missing = client.post(
+                "/api/ai/v1/chat/completions", headers=auth_headers(),
+                json={**chat_payload("groq/model"), "stream": True},
+            )
+        self.assertEqual(missing.status_code, 503)
+        self.assertEqual(missing.get_json()["error"]["code"], "missing_api_key")
+
+    def test_upstream_http_failure_uses_sanitized_json_before_streaming(self):
+        app = make_app()
+        upstream = StreamingResponse([], status=401)
+
+        with patch.dict(os.environ, {"GROQ_API_KEY": KEYS["groq"][1]}), \
+                patch.object(requests.Session, "request", return_value=upstream):
+            result = app.test_client().post(
+                "/api/ai/v1/chat/completions", headers=auth_headers(),
+                json={**chat_payload("groq/model"), "stream": True},
+            )
+        self.assertEqual(result.status_code, 502)
+        self.assertEqual(result.get_json()["error"]["code"], "upstream_authentication_failed")
+        self.assertTrue(upstream.closed)
+
+    def test_upstream_disconnect_emits_error_and_closes_response(self):
+        app = make_app()
+
+        def chunks():
+            yield b'data: {"choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}]}\n\n'
+            raise requests.ConnectionError("sensitive upstream details")
+
+        upstream = StreamingResponse(chunks())
+        with patch.dict(os.environ, {"GROQ_API_KEY": KEYS["groq"][1]}), \
+                patch.object(requests.Session, "request", return_value=upstream):
+            result = app.test_client().post(
+                "/api/ai/v1/chat/completions", headers=auth_headers(),
+                json={**chat_payload("groq/model"), "stream": True}, buffered=False,
+            )
+            body = b"".join(result.response).decode()
+            result.close()
+        self.assertIn('"code":"upstream_disconnected"', body)
+        self.assertNotIn("sensitive upstream details", body)
+        self.assertTrue(body.endswith("data: [DONE]\n\n"))
+        self.assertTrue(upstream.closed)
+
+    def test_upstream_read_timeout_is_reported_as_timeout(self):
+        app = make_app()
+
+        def chunks():
+            yield b""
+            raise requests.ConnectionError("Read timed out.")
+
+        upstream = StreamingResponse(chunks())
+        with patch.dict(os.environ, {"GROQ_API_KEY": KEYS["groq"][1]}), \
+                patch.object(requests.Session, "request", return_value=upstream):
+            result = app.test_client().post(
+                "/api/ai/v1/chat/completions", headers=auth_headers(),
+                json={**chat_payload("groq/model"), "stream": True}, buffered=False,
+            )
+            body = b"".join(result.response).decode()
+            result.close()
+        self.assertIn('"code":"upstream_timeout"', body)
+        self.assertTrue(upstream.closed)
+
+    def test_client_close_releases_upstream_response(self):
+        app = make_app()
+        upstream = StreamingResponse([
+            b'data: {"choices":[{"index":0,"delta":{"content":"first"},"finish_reason":null}]}\n\n',
+            b'data: {"choices":[{"index":0,"delta":{"content":"second"},"finish_reason":null}]}\n\n',
+        ])
+        with patch.dict(os.environ, {"GROQ_API_KEY": KEYS["groq"][1]}), \
+                patch.object(requests.Session, "request", return_value=upstream):
+            result = app.test_client().post(
+                "/api/ai/v1/chat/completions", headers=auth_headers(),
+                json={**chat_payload("groq/model"), "stream": True}, buffered=False,
+            )
+            next(result.response)
+            self.assertEqual(upstream.yielded, 1)
+            result.close()
+        self.assertTrue(upstream.closed)
+
+    def test_stream_response_size_limit_closes_upstream(self):
+        app = make_app()
+        context = app.extensions["mirror"]
+        context.config = replace(context.config, ai_max_response_bytes=64)
+        upstream = StreamingResponse([
+            b'data: {"choices":[{"index":0,"delta":{"content":"' + b"x" * 100 + b'"}}]}\n\n',
+        ])
+        with patch.dict(os.environ, {"GROQ_API_KEY": KEYS["groq"][1]}), \
+                patch.object(requests.Session, "request", return_value=upstream):
+            result = app.test_client().post(
+                "/api/ai/v1/chat/completions", headers=auth_headers(),
+                json={**chat_payload("groq/model"), "stream": True}, buffered=False,
+            )
+            body = b"".join(result.response).decode()
+            result.close()
+        self.assertIn('"code":"upstream_response_too_large"', body)
+        self.assertTrue(upstream.closed)
+
+    def test_stream_timeout_emits_error_and_closes_response(self):
+        app = make_app()
+        context = app.extensions["mirror"]
+        context.config = replace(context.config, ai_stream_timeout=0.000001)
+        upstream = StreamingResponse([
+            b'data: {"choices":[{"index":0,"delta":{"content":"x"},"finish_reason":null}]}\n\n',
+        ])
+        with patch.dict(os.environ, {"GROQ_API_KEY": KEYS["groq"][1]}), \
+                patch.object(requests.Session, "request", return_value=upstream):
+            result = app.test_client().post(
+                "/api/ai/v1/chat/completions", headers=auth_headers(),
+                json={**chat_payload("groq/model"), "stream": True}, buffered=False,
+            )
+            body = b"".join(result.response).decode()
+            result.close()
+        self.assertIn('"code":"upstream_timeout"', body)
+        self.assertTrue(upstream.closed)
 
 
 class AIModelDiscoveryTests(unittest.TestCase):

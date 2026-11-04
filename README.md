@@ -10,12 +10,14 @@ are required for private pages and APIs.
 - `GET /api/services` — authenticated list of enabled services.
 - `GET /api/diagnostics/outbound` — authenticated outbound connectivity diagnostics.
 - `GET /diagnostics` — diagnostics page for logged-in browser sessions.
-- `POST /api/ai/v1/chat/completions` — authenticated, non-streaming OpenAI-compatible chat completion.
+- `POST /api/ai/v1/chat/completions` — authenticated OpenAI-compatible chat completion, streamed or non-streamed.
 - `GET /api/ai/v1/models` — authenticated model discovery for configured AI providers.
 
 The AI API is server-side only. It never accepts a client-provided upstream URL.
-Responses use an OpenAI-style completion body and sanitized JSON errors. Streaming,
-tool/function calls, and image/audio inputs are not supported in this first version.
+Non-streaming responses use an OpenAI-style completion body. Streaming requests return
+Server-Sent Events (`text/event-stream`) with OpenAI-compatible completion chunks and
+terminate with `data: [DONE]`. Tool/function calls and image/audio inputs are not
+supported.
 
 ## Authentication
 
@@ -62,9 +64,20 @@ are reported per provider without exposing upstream error bodies.
 Supported chat fields include `model`, text `messages` with `system`, `user`, or
 `assistant` roles, `temperature`, `top_p`, `max_tokens` (or
 `max_completion_tokens`), `stop`, `frequency_penalty`, `presence_penalty`, and `seed`.
-Requests are limited to 100 messages and 100,000 text characters; HTTP request size is
-capped at 1 MB. The gateway limits AI API usage to 60 requests per minute per client IP
-in each application process.
+Streaming additionally supports `stream` and `stream_options.include_usage`. Requests
+are limited to 100 messages and 100,000 text characters; HTTP request size is capped at
+1 MB. The gateway limits AI API usage to 60 requests per minute per client IP in each
+application process.
+
+All four OpenAI-compatible providers (Groq, OpenRouter, Cerebras, and Mistral) receive
+`stream=true`; their SSE chunks are normalized without collecting the completion.
+Usage is forwarded when returned by the provider. Request it with
+`stream_options: {"include_usage": true}` when supported by the selected provider/model.
+Gemini uses its native `streamGenerateContent` API with `alt=sse`; candidate text,
+finish reasons, and usage metadata are translated into completion chunks. Gemini does
+not send OpenAI's `[DONE]` marker, so the gateway emits it when the native stream ends.
+Provider errors or disconnects after SSE headers are sent are delivered as an SSE error
+event followed by `[DONE]`; failures before streaming starts use the normal JSON error.
 
 ## Python client
 
@@ -82,6 +95,16 @@ response = client.chat.completions.create(
     max_tokens=128,
 )
 print(response.choices[0].message.content)
+
+with client.chat.completions.create(
+    model="groq/PROVIDER_MODEL_ID",
+    messages=[{"role": "user", "content": "Hello"}],
+    stream=True,
+) as stream:
+    for chunk in stream:
+        text = chunk.choices[0].delta.content
+        if text:
+            print(text, end="", flush=True)
 ```
 
 The OpenAI Python package is a client-side example; it is not an application
@@ -104,7 +127,11 @@ environment file with `cp .env.example .env`.
 
 Set `APP_ENV=development`, `SECRET_KEY`, `ACCESS_PASSWORD_HASH` and/or `API_TOKEN`,
 and provider keys in `.env`. Never commit `.env` or real credentials. `AI_TIMEOUT`
-defaults to 60 seconds and `AI_MAX_RESPONSE_BYTES` to 5,000,000.
+defaults to 60 seconds and `AI_MAX_RESPONSE_BYTES` to 5,000,000. Streaming defaults
+to a 240-second generation limit and a 30-second provider idle timeout
+(`AI_STREAM_TIMEOUT` and `AI_STREAM_IDLE_TIMEOUT`).
+The generation deadline is checked between upstream reads; the idle timeout bounds a
+stalled read.
 
 ## PythonAnywhere deployment
 
@@ -138,18 +165,45 @@ defaults to 60 seconds and `AI_MAX_RESPONSE_BYTES` to 5,000,000.
    Store those values only in PythonAnywhere's private WSGI/environment settings, not
    in this repository. Leave unused provider key variables unset. Set `AI_TIMEOUT` or
    `AI_MAX_RESPONSE_BYTES` there as well if the defaults are unsuitable.
+6. For streaming, optionally set `AI_STREAM_TIMEOUT` (default 240 seconds) and
+   `AI_STREAM_IDLE_TIMEOUT` (default 30 seconds) in the WSGI environment. Keep the
+   stream lifetime below PythonAnywhere's documented web-worker timeout.
 7. Save, reload the web app, log in or authenticate with the Bearer token, then request
    `/api/ai/v1/models` to verify provider discovery. PythonAnywhere plan/network
    restrictions may prevent outbound connections to one or more official provider
    endpoints.
 
+## PythonAnywhere streaming verification
+
+Streaming is a synchronous WSGI response and occupies a web worker until it completes,
+times out, or disconnects. PythonAnywhere [documents a five-minute web-worker
+timeout](https://help.pythonanywhere.com/pages/AsyncInWebApps/), but this project has
+not been deployed and tested there; SSE delivery, buffering, and client-disconnect
+behavior on PythonAnywhere remain unverified. Configure `AI_STREAM_TIMEOUT` below the
+platform worker timeout and `AI_STREAM_IDLE_TIMEOUT` for the longest acceptable wait
+between provider bytes. After deployment, test with an authenticated client:
+
+```bash
+curl -N https://YOUR-DOMAIN/api/ai/v1/chat/completions \
+  -H "Authorization: Bearer YOUR_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"groq/PROVIDER_MODEL_ID","messages":[{"role":"user","content":"Hello"}],"stream":true}'
+```
+
+Confirm chunks arrive incrementally and test client disconnect behavior on the actual
+deployment. Local tests do not establish PythonAnywhere streaming support.
+
 ## Known limitations
 
-- Streaming is explicitly unsupported.
+- Streaming is implemented for the four OpenAI-compatible providers and Gemini,
+  subject to provider/model support and deployment-server behavior.
 - Text-only chat messages and the `system`, `user`, and `assistant` roles are supported;
   tool/function calls and multimodal content are not.
 - Model availability depends on each provider's model-list endpoint and account access.
 - The rate limiter and model-discovery cache are in-memory and per process; rate limits
   are not shared across multiple workers or instances.
+- Long-lived streams occupy a synchronous web worker until completion, timeout, or
+  disconnect. Reverse-proxy buffering and PythonAnywhere SSE compatibility are not
+  verified here.
 - No live provider calls are performed by the test suite. Real API credentials, model
   access, billing, and deployment-network access must be verified by the operator.
