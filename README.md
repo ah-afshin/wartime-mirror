@@ -10,6 +10,9 @@ are required for private pages and APIs.
 - `GET /api/services` — authenticated list of enabled services.
 - `GET /api/diagnostics/outbound` — authenticated outbound connectivity diagnostics.
 - `GET /diagnostics` — diagnostics page for logged-in browser sessions.
+- `GET /api/ai/v1/conversations` — list the logged-in browser user's conversations.
+- `POST /api/ai/v1/conversations` — create a conversation.
+- `GET`, `PATCH`, `DELETE /api/ai/v1/conversations/<id>` — retrieve, update, or delete an owned conversation.
 - `POST /api/ai/v1/chat/completions` — authenticated OpenAI-compatible chat completion, streamed or non-streamed.
 - `GET /api/ai/v1/models` — authenticated model discovery for configured AI providers.
 
@@ -38,6 +41,19 @@ creating the first account. Additional accounts are provisioned with the same co
 
 The AI routes require authentication. Do not send provider keys from clients; keys are
 configured on the server and are never included in gateway responses.
+
+## Conversation API
+
+Conversation endpoints require a valid browser session with a database-backed user.
+Ownership always comes from that session; request-supplied user IDs are not accepted.
+The shared `API_TOKEN` continues to authenticate existing AI Gateway clients, but
+cannot access conversation history. Mutating browser requests require the existing
+CSRF token (`csrf_token` form field or `X-CSRF-Token` header).
+
+Conversation creation and model updates validate identifiers against the AI service's
+currently discovered model list. A discovery failure returns an error rather than
+silently switching models. Conversation details include messages ordered by their
+database IDs. Message sending and frontend chat UI are not implemented here.
 
 ## Layout
 

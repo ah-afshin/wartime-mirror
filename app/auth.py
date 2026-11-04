@@ -70,7 +70,7 @@ def _bearer_ok() -> bool:
     return hmac.compare_digest(header[7:].strip().encode(), token.encode())
 
 
-def _csrf_ok() -> bool:
+def csrf_valid() -> bool:
     sent = request.form.get("csrf_token") or request.headers.get("X-CSRF-Token", "")
     expected = session.get("csrf", "")
     return bool(sent and expected and hmac.compare_digest(sent, expected))
@@ -92,7 +92,7 @@ def enforce_access():
             and request.endpoint not in PUBLIC_ENDPOINTS
             and not authenticated):
         return jsonify(error="Authentication required", status=401), 401
-    if request.method not in SAFE_METHODS and not bearer and not _csrf_ok():
+    if request.method not in SAFE_METHODS and not bearer and not csrf_valid():
         abort(400, "Missing or invalid CSRF token")
     if request.endpoint is None or request.endpoint in PUBLIC_ENDPOINTS or authenticated:
         return None
