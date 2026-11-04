@@ -13,6 +13,7 @@ are required for private pages and APIs.
 - `GET /api/ai/v1/conversations` — list the logged-in browser user's conversations.
 - `POST /api/ai/v1/conversations` — create a conversation.
 - `GET`, `PATCH`, `DELETE /api/ai/v1/conversations/<id>` — retrieve, update, or delete an owned conversation.
+- `POST /api/ai/v1/conversations/<id>/messages` — save a user message and generate a non-streaming assistant response.
 - `POST /api/ai/v1/chat/completions` — authenticated OpenAI-compatible chat completion, streamed or non-streamed.
 - `GET /api/ai/v1/models` — authenticated model discovery for configured AI providers.
 
@@ -53,7 +54,11 @@ CSRF token (`csrf_token` form field or `X-CSRF-Token` header).
 Conversation creation and model updates validate identifiers against the AI service's
 currently discovered model list. A discovery failure returns an error rather than
 silently switching models. Conversation details include messages ordered by their
-database IDs. Message sending and frontend chat UI are not implemented here.
+database IDs. Message generation accepts JSON `{"content": "..."}`; it persists the
+user message before calling the existing AI service with the conversation's selected
+model and stored history. If generation fails, the user message remains saved and no
+assistant message is created. The first message also sets a short title from its text.
+Generation is non-streaming; frontend chat UI is not implemented here.
 
 ## Layout
 
