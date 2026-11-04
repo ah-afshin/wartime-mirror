@@ -112,12 +112,18 @@ dependency. Use a model identifier returned by the authenticated models endpoint
 
 ## Local setup
 
+The application uses SQLAlchemy with Alembic migrations. The default SQLite
+database is stored in the repository's persistent `instance/` directory; set
+`DATABASE_URL` to use another database location. Apply schema changes before
+starting the application with `alembic upgrade head`.
+
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 python tools/make_hash.py
 Copy-Item .env.example .env
+alembic upgrade head
 flask --app wsgi run --debug
 python -m unittest discover -v
 ```
@@ -157,6 +163,7 @@ stalled read.
    os.environ["SECRET_KEY"] = "replace-with-a-random-value-of-at-least-32-characters"
    os.environ["ACCESS_PASSWORD_HASH"] = "replace-with-generated-password-hash"
    os.environ["API_TOKEN"] = "replace-with-a-long-random-api-token"
+   os.environ["DATABASE_URL"] = "sqlite:////home/yourusername/.local/share/wartime-mirror.sqlite3"
    os.environ["GROQ_API_KEY"] = "optional-provider-key"
 
    from wsgi import application
@@ -165,6 +172,10 @@ stalled read.
    Store those values only in PythonAnywhere's private WSGI/environment settings, not
    in this repository. Leave unused provider key variables unset. Set `AI_TIMEOUT` or
    `AI_MAX_RESPONSE_BYTES` there as well if the defaults are unsuitable.
+   Database migrations: run `alembic upgrade head` from the project directory with the same virtualenv
+   and `DATABASE_URL` configured. Keep the SQLite database on persistent storage
+   outside temporary or deployment-replaced directories; the parent directory is
+   created automatically.
 6. For streaming, optionally set `AI_STREAM_TIMEOUT` (default 240 seconds) and
    `AI_STREAM_IDLE_TIMEOUT` (default 30 seconds) in the WSGI environment. Keep the
    stream lifetime below PythonAnywhere's documented web-worker timeout.

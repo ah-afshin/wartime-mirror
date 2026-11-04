@@ -13,6 +13,7 @@ from app.core.context import AppContext
 from app.core.errors import register_error_handlers
 from app.core.http_client import HttpClient
 from app.core.ratelimit import FailureLimiter
+from app.database import init_app as init_database
 from app.registry import init_services
 
 
@@ -24,6 +25,7 @@ def create_app(config: Config | None = None) -> Flask:
     app = Flask(__name__)
     app.config.update(
         SECRET_KEY=cfg.secret_key,
+        DATABASE_URL=cfg.database_url,
         SESSION_COOKIE_HTTPONLY=True,
         SESSION_COOKIE_SAMESITE="Lax",
         SESSION_COOKIE_SECURE=cfg.is_production,
@@ -34,11 +36,13 @@ def create_app(config: Config | None = None) -> Flask:
     if cfg.trust_proxy:
         app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 
+    database = init_database(app)
     ctx = AppContext(
         config=cfg,
         http=HttpClient(cfg.http_timeout, cfg.http_max_bytes, cfg.user_agent),
         cache=MemoryCache(cfg.cache_max_items, cfg.cache_ttl),
         login_limiter=FailureLimiter(cfg.login_max_failures, cfg.login_window_seconds),
+        database=database,
     )
     app.extensions["mirror"] = ctx
 

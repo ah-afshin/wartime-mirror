@@ -4,7 +4,10 @@ from __future__ import annotations
 import math
 import os
 import secrets
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
+from pathlib import Path
+
+from sqlalchemy.engine import URL
 
 
 def _csv(value: str) -> tuple[str, ...]:
@@ -15,6 +18,11 @@ def _flag(value: str | None, default: bool) -> bool:
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _default_database_url() -> str:
+    database_path = Path(__file__).resolve().parents[1] / "instance" / "wartime_mirror.sqlite3"
+    return URL.create("sqlite", database=str(database_path)).render_as_string(hide_password=False)
 
 
 @dataclass(frozen=True)
@@ -37,6 +45,7 @@ class Config:
     user_agent: str = "MirrorBot/0.1"
     login_max_failures: int = 5
     login_window_seconds: int = 600
+    database_url: str = field(default_factory=_default_database_url)
 
     @property
     def is_production(self) -> bool:
@@ -64,6 +73,7 @@ class Config:
             ai_stream_timeout=float(e("AI_STREAM_TIMEOUT", "240")),
             ai_stream_idle_timeout=float(e("AI_STREAM_IDLE_TIMEOUT", "30")),
             cache_ttl=int(e("CACHE_TTL", "300")),
+            database_url=e("DATABASE_URL") or _default_database_url(),
         )
         return replace(cfg, **overrides)
 

@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 
 from app.config import Config
 from app.core.cache import MemoryCache
+from app.database import Database
 from app.core.http_client import HttpClient
 from app.core.ratelimit import FailureLimiter
 
@@ -15,4 +16,5 @@ class AppContext:
     http: HttpClient
     cache: MemoryCache
     login_limiter: FailureLimiter
+    database: Database
     services: dict = field(default_factory=dict)

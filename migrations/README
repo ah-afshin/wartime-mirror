@@ -1,0 +1,1 @@
+Database schema migrations. Apply with `alembic upgrade head`.
