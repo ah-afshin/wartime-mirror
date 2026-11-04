@@ -1,4 +1,4 @@
-"""Failure limiter for login attempts (per process, in memory)."""
+"""Per-process in-memory limiters for login failures and API requests."""
 from __future__ import annotations
 
 import threading
@@ -33,3 +33,28 @@ class FailureLimiter:
     def reset(self, key: str) -> None:
         with self._lock:
             self._fails.pop(key, None)
+
+
+class RequestLimiter:
+    """In-memory per-key sliding-window limit for API requests."""
+
+    def __init__(self, max_requests: int, window: int, max_keys: int = 10000):
+        self.max_requests = max_requests
+        self.window = window
+        self.max_keys = max_keys
+        self._requests: dict[str, list[float]] = {}
+        self._lock = threading.Lock()
+
+    def allow(self, key: str) -> bool:
+        with self._lock:
+            now = time.monotonic()
+            recent = [t for t in self._requests.get(key, []) if now - t < self.window]
+            if len(recent) >= self.max_requests:
+                self._requests[key] = recent
+                return False
+            recent.append(now)
+            self._requests[key] = recent
+            if len(self._requests) > self.max_keys:
+                oldest = min(self._requests, key=lambda item: self._requests[item][-1])
+                del self._requests[oldest]
+            return True

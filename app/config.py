@@ -1,6 +1,7 @@
 """All configuration comes from environment variables (see .env.example)."""
 from __future__ import annotations
 
+import math
 import os
 import secrets
 from dataclasses import dataclass, replace
@@ -27,6 +28,10 @@ class Config:
     session_days: int = 14
     http_timeout: float = 10.0
     http_max_bytes: int = 5_000_000
+    ai_timeout: float = 60.0
+    ai_max_response_bytes: int = 5_000_000
+    ai_stream_timeout: float = 240.0
+    ai_stream_idle_timeout: float = 30.0
     cache_ttl: int = 300
     cache_max_items: int = 500
     user_agent: str = "MirrorBot/0.1"
@@ -54,6 +59,10 @@ class Config:
             session_days=int(e("SESSION_DAYS", "14")),
             http_timeout=float(e("HTTP_TIMEOUT", "10")),
             http_max_bytes=int(e("HTTP_MAX_BYTES", "5000000")),
+            ai_timeout=float(e("AI_TIMEOUT", "60")),
+            ai_max_response_bytes=int(e("AI_MAX_RESPONSE_BYTES", "5000000")),
+            ai_stream_timeout=float(e("AI_STREAM_TIMEOUT", "240")),
+            ai_stream_idle_timeout=float(e("AI_STREAM_IDLE_TIMEOUT", "30")),
             cache_ttl=int(e("CACHE_TTL", "300")),
         )
         return replace(cfg, **overrides)
@@ -68,5 +77,10 @@ class Config:
             problems.append("set ACCESS_PASSWORD_HASH and/or API_TOKEN (otherwise the app would be open to everyone)")
         if self.is_production and len(self.secret_key) < 32:
             problems.append("SECRET_KEY must be at least 32 characters in production")
+        if (not math.isfinite(self.ai_timeout) or self.ai_timeout <= 0
+                or not math.isfinite(self.ai_stream_timeout) or self.ai_stream_timeout <= 0
+                or not math.isfinite(self.ai_stream_idle_timeout) or self.ai_stream_idle_timeout <= 0
+                or self.ai_max_response_bytes <= 0):
+            problems.append("AI timeout values and AI_MAX_RESPONSE_BYTES must be positive")
         if problems:
             raise RuntimeError("Invalid configuration: " + "; ".join(problems))
