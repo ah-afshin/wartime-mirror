@@ -49,12 +49,15 @@ def _safe_next(nxt: str | None) -> str:
 def enforce_access():
     """before_request hook: CSRF for browser sessions, then default-deny auth."""
     bearer = _bearer_ok()
+    authenticated = bearer or session.get("auth") is True
+    if (request.path.startswith("/api/") and request.endpoint is not None
+            and request.endpoint not in PUBLIC_ENDPOINTS
+            and not authenticated):
+        return jsonify(error="Authentication required", status=401), 401
     if request.method not in SAFE_METHODS and not bearer and not _csrf_ok():
         abort(400, "Missing or invalid CSRF token")
-    if request.endpoint is None or request.endpoint in PUBLIC_ENDPOINTS or bearer or session.get("auth") is True:
+    if request.endpoint is None or request.endpoint in PUBLIC_ENDPOINTS or authenticated:
         return None
-    if request.path.startswith("/api/"):
-        return jsonify(error="Authentication required", status=401), 401
     target = request.path + ("?" + request.query_string.decode() if request.query_string else "")
     return redirect(url_for("auth.login", next=target))
 
