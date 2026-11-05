@@ -1,0 +1,15 @@
+.wikipedia h1{margin-top:.25rem}
+.wikipedia form{margin:1.25rem 0}
+.wikipedia form>label,.wikipedia-options label{display:block;font-weight:600;margin:.55rem 0 .25rem}
+.wikipedia-options{display:grid;grid-template-columns:2fr 1fr;gap:.7rem}
+.wikipedia select{font:inherit;padding:.6rem .8rem;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--fg);width:100%}
+.wikipedia-status{min-height:1.6em;color:var(--muted)}
+.wikipedia-result{padding:.8rem 0;border-bottom:1px solid var(--line)}
+.wikipedia-result button{width:auto;margin:0;padding:0;background:none;color:var(--accent);text-align:start;font-weight:600}
+.wikipedia-result p{margin:.25rem 0}
+.wikipedia-result-meta{font-size:.875rem;color:var(--muted)}
+.wikipedia-article{margin-top:1.5rem;padding-top:1rem;border-top:1px solid var(--line)}
+.wikipedia-article h2{margin-bottom:.25rem}
+.wikipedia-article[dir=rtl]{text-align:right}
+.wikipedia-extract{white-space:pre-wrap;overflow-wrap:anywhere}
+@media(max-width:34rem){.wikipedia-options{grid-template-columns:1fr}}

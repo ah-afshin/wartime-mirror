@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block title %}Wikipedia · Mirror{% endblock %}
+{% block head %}
+<link rel="stylesheet" href="{{ url_for('static', filename='wikipedia.css') }}">
+<script src="{{ url_for('static', filename='wikipedia.js') }}" defer></script>
+{% endblock %}
+{% block body_class %}wikipedia-page{% endblock %}
+{% block content %}
+<section class="wikipedia" id="wikipedia"
+         data-search-url="{{ url_for('wikipedia.search') }}"
+         data-page-url="{{ url_for('wikipedia.page') }}">
+  <h1>Wikipedia</h1>
+  <p class="muted">Search articles and read a plain-text extract.</p>
+
+  <form id="wikipedia-search-form">
+    <label for="wikipedia-query">Article search</label>
+    <input id="wikipedia-query" name="q" type="search" maxlength="300"
+           required autocomplete="off" placeholder="Search Wikipedia">
+    <div class="wikipedia-options">
+      <div>
+        <label for="wikipedia-language">Language</label>
+        <select id="wikipedia-language" name="lang">
+          <option value="en" selected>English</option>
+          <option value="fa">Persian (فارسی)</option>
+        </select>
+      </div>
+      <div>
+        <label for="wikipedia-limit">Results</label>
+        <select id="wikipedia-limit" name="limit">
+          <option value="5" selected>5</option>
+          <option value="10">10</option>
+          <option value="20">20</option>
+        </select>
+      </div>
+    </div>
+    <button id="wikipedia-search-submit" type="submit">Search Wikipedia</button>
+  </form>
+
+  <p id="wikipedia-search-status" class="wikipedia-status" role="status"
+     aria-live="polite"></p>
+  <p id="wikipedia-search-error" class="err" role="alert" hidden></p>
+
+  <section id="wikipedia-search-results" aria-label="Wikipedia search results" hidden>
+    <h2 id="wikipedia-results-heading">Articles</h2>
+    <ol id="wikipedia-result-list"></ol>
+  </section>
+
+  <article id="wikipedia-article" class="wikipedia-article" aria-live="polite" hidden>
+    <p id="wikipedia-page-status" class="wikipedia-status" role="status"></p>
+    <div id="wikipedia-page-error" class="err" role="alert" hidden></div>
+    <h2 id="wikipedia-page-title"></h2>
+    <p id="wikipedia-page-metadata" class="muted"></p>
+    <p><a id="wikipedia-canonical-link" target="_blank" rel="noopener noreferrer">
+      Read on Wikipedia
+    </a></p>
+    <div id="wikipedia-extract" class="wikipedia-extract"></div>
+  </article>
+</section>
+{% endblock %}

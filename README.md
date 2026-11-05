@@ -9,6 +9,16 @@ are required for private pages and APIs.
 - `GET /healthz` — public health check.
 - `GET /api/services` — authenticated list of enabled services.
 - `GET /api/diagnostics/outbound` — authenticated outbound connectivity diagnostics.
+- `GET /api/duckduckgo/v1/search?q=python&limit=5` — authenticated DuckDuckGo web search.
+- `GET /api/duckduckgo/v1/diagnostics` — authenticated DuckDuckGo integration diagnostics.
+- `GET /duckduckgo` — authenticated DuckDuckGo search page.
+- `GET /api/google-search/v1/search?q=python&limit=5` — authenticated Google web search.
+- `GET /api/google-search/v1/diagnostics` — authenticated Google Search configuration and quota diagnostics.
+- `GET /google-search` — authenticated Google Search browser page.
+- `GET /api/wikipedia/v1/search?q=neural+networks&lang=en&limit=5` — authenticated Wikipedia article search.
+- `GET /api/wikipedia/v1/page?title=Neural+network&lang=en` — authenticated article metadata and plain-text extract.
+- `GET /api/wikipedia/v1/diagnostics` — authenticated Wikipedia API connectivity check.
+- `GET /wikipedia` — authenticated Wikipedia search and article page.
 - `GET /diagnostics` — diagnostics page for logged-in browser sessions.
 - `GET /chat` — authenticated browser chat interface.
 - `GET /api/ai/v1/conversations` — list the logged-in browser user's conversations.
@@ -24,6 +34,105 @@ Non-streaming responses use an OpenAI-style completion body. Streaming requests 
 Server-Sent Events (`text/event-stream`) with OpenAI-compatible completion chunks and
 terminate with `data: [DONE]`. Tool/function calls and image/audio inputs are not
 supported.
+
+## Wikipedia API
+
+The independent Wikipedia service uses the official MediaWiki API and requires no API
+key. It is disabled by default; set `WIKIPEDIA_ENABLED=1` to enable it. If
+`ENABLED_SERVICES` is non-empty, it must also include `wikipedia`.
+
+Search accepts `q` (required, up to 300 characters), `lang` (defaults to `en`), and
+`limit` (defaults to 5; allowed range 1–20). Page retrieval accepts `title` (required,
+up to 300 characters) and `lang`. Language codes are lowercase MediaWiki project
+codes, including `en` and `fa` for English and Persian. Both endpoints return
+deterministic JSON; search snippets are plain text, and page results include a plain
+text article extract, canonical URL, page ID, and available page metadata. Search
+responses have the shape `{"query":"...","language":"en","count":1,"results":[...]}`;
+page responses have the shape
+`{"page":{"pageid":1,"title":"...","language":"en","url":"...","extract":"..."}}`.
+No search results produce an empty `results` list. Missing pages return HTTP 404;
+invalid parameters return HTTP 400; upstream and malformed-response errors return
+HTTP 502, upstream timeouts return HTTP 504, and more than 60 requests per minute
+per client IP return HTTP 429. The service caches successful
+responses using the shared in-memory TTL cache. Requests require the same browser
+session or Bearer API token as the rest of the private API.
+
+For PythonAnywhere deployments, ensure outbound access is available to the selected
+Wikipedia language subdomain (for example, `en.wikipedia.org` or `fa.wikipedia.org`).
+The service uses the shared HTTP client and does not require an additional package.
+The authenticated `/wikipedia` page provides an English/Persian search form, lets you
+select an article from the results, and displays its plain-text extract, metadata, and
+canonical Wikipedia link. It calls only the independent Wikipedia API described above.
+
+## DuckDuckGo Search API
+
+The independent DuckDuckGo service uses the unofficial `ddgs` Python package, not an
+official DuckDuckGo search API, and requires no API key. It is disabled by default;
+set `DUCKDUCKGO_ENABLED=1` to enable it. If `ENABLED_SERVICES` is non-empty, it must
+also include `duckduckgo`. The service always explicitly selects the `duckduckgo`
+text backend; it does not use `ddgs` automatic multi-engine mode or fall back to
+other search providers.
+
+`GET /api/duckduckgo/v1/search` accepts `q` (required, up to 500 characters), `limit`
+(defaults to 5; allowed range 1–20), `region` (defaults to `us-en`), optional `lang`
+(two- or three-letter language code, replacing the region's language suffix), and
+`safesearch` (`on`, `moderate`, or `off`; defaults to `moderate`). Region values use
+the `country-language` format supported by `ddgs`, for example `us-en` or `uk-en`.
+The response contains the original query, selected region and safe-search setting,
+provider source, result count, and results with `title`, `url`, `snippet`, and
+`source`. An empty result set returns HTTP 200 with `"count": 0` and `"results": []`.
+Invalid parameters return HTTP 400; provider rate limits return HTTP 429; timeouts
+return HTTP 504; other provider failures return HTTP 502. The endpoint also limits
+each client IP to 30 requests per minute and caches successful responses. Diagnostics
+identify the package version, selected backend, and unofficial integration status;
+they do not guarantee current upstream availability.
+
+`ddgs` 9.16.1 supports Python 3.10–3.14. It is an unofficial integration that may be
+rate-limited or disrupted by changes to DuckDuckGo; search availability is not
+guaranteed. Ensure deployment hosts can reach the provider.
+The authenticated `/duckduckgo` page provides query, result-count, country, language,
+and safe-search controls, then displays results from only the DuckDuckGo service API.
+It does not submit searches to another provider.
+
+## Google Search API
+
+The independent Google Search service uses SerpApi's third-party Google results
+engine, not an official Google API. It does not aggregate providers or fall back to
+another search engine. It is disabled by default; set `GOOGLE_SEARCH_ENABLED=1` and
+provide `SERPAPI_API_KEY` from a server-side **free-tier-only** SerpApi account. If
+`ENABLED_SERVICES` is non-empty, include `google_search` too. Keep the key secret;
+it is never returned by the API or diagnostics. Do not activate a paid plan,
+overages, or automatic renewal.
+
+The authenticated `/google-search` page is a dedicated UI for this service and is
+linked from the home-page Services list. The independent
+`GET /api/google-search/v1/search` endpoint accepts `q` (required, up to 500
+characters), `limit` (defaults to 5; allowed range 1–10), `gl` (two-letter country
+code, defaults to `us`), and `hl` (language code, defaults to `en`). Responses
+contain `query`, `country`, `language`, `source`, `count`, and results with `title`,
+`url`, `snippet`, `position`, and `source`. A successful search with no organic
+results returns HTTP 200 and an empty `results` list. Invalid parameters return
+HTTP 400; provider rate limiting or exhausted provider quota returns HTTP 429;
+upstream timeouts return HTTP 504; malformed or other upstream failures return
+HTTP 502. The endpoint has a 30-requests-per-minute per-client-IP limit and caches
+successful responses.
+
+To keep usage below the currently published free allowance, the service atomically
+reserves a maximum of 200 provider requests per UTC calendar month in the persistent
+application database. Cache hits do not consume the local allowance; provider
+attempts reserve usage before sending a request, including attempts that fail. Once
+the local limit is reached, the service fails closed without contacting the
+provider. Run `alembic upgrade head` to create the quota ledger table before enabling
+the service. This local ceiling does not guarantee future provider quotas or pricing;
+confirm the key remains on a no-charge free plan. Diagnostics show the provider
+engine, whether a key is configured, and remaining local monthly allowance; they
+do not make a billable provider request.
+
+The service uses the shared HTTP client and adds no Python dependency. Ensure the
+deployment can reach `serpapi.com`. That host is not on PythonAnywhere's free-account
+outbound allowlist; use an eligible unrestricted-egress account or request an
+allowlist change before enabling the feature. Egress availability is separate from
+provider terms and pricing.
 
 ## Authentication
 
