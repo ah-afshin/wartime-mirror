@@ -47,6 +47,7 @@ class Config:
     database_url: str = field(default_factory=_default_database_url)
     wikipedia_enabled: bool = False
     duckduckgo_enabled: bool = False
+    google_search_enabled: bool = False
 
     @property
     def is_production(self) -> bool:
@@ -65,6 +66,7 @@ class Config:
             api_token=e("API_TOKEN", ""),
             enabled_services=_csv(e("ENABLED_SERVICES", "")),
             wikipedia_enabled=_flag(e("WIKIPEDIA_ENABLED"), False),
+            google_search_enabled=_flag(e("GOOGLE_SEARCH_ENABLED"), False),
             trust_proxy=_flag(e("TRUST_PROXY"), True),
             session_days=int(e("SESSION_DAYS", "14")),
             http_timeout=float(e("HTTP_TIMEOUT", "10")),

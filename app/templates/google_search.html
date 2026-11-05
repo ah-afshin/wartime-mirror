@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block title %}Google Search · Mirror{% endblock %}
+{% block head %}
+<link rel="stylesheet" href="{{ url_for('static', filename='google_search.css') }}">
+<script src="{{ url_for('static', filename='google_search.js') }}" defer></script>
+{% endblock %}
+{% block body_class %}google-search-page{% endblock %}
+{% block content %}
+<section class="google-search" id="google-search"
+         data-search-url="{{ url_for('google_search.search') }}">
+  <h1>Google Web Search</h1>
+  <p class="muted">Search Google results through the independent Google Search service.</p>
+
+  <form id="google-search-form">
+    <label for="google-search-query">Search query</label>
+    <input id="google-search-query" name="q" type="search" maxlength="500"
+           required autocomplete="off" placeholder="What are you looking for?">
+
+    <div class="google-search-options">
+      <div>
+        <label for="google-search-limit">Results</label>
+        <select id="google-search-limit" name="limit">
+          <option value="5" selected>5</option>
+          <option value="10">10</option>
+        </select>
+      </div>
+      <div>
+        <label for="google-search-country">Country</label>
+        <input id="google-search-country" name="gl" value="us" maxlength="2"
+               pattern="[a-z]{2}" title="Two-letter lowercase country code">
+      </div>
+      <div>
+        <label for="google-search-language">Language</label>
+        <input id="google-search-language" name="hl" value="en" maxlength="5"
+               pattern="[a-z]{2,3}(-[a-z]{2})?" title="Language code, for example en or fa">
+      </div>
+    </div>
+    <button id="google-search-submit" type="submit">Search Google</button>
+  </form>
+
+  <p id="google-search-status" class="google-search-status" role="status"
+     aria-live="polite"></p>
+  <p id="google-search-error" class="err" role="alert" hidden></p>
+  <section id="google-search-results" aria-label="Google search results" hidden>
+    <h2 id="google-search-results-heading">Results</h2>
+    <ol id="google-search-result-list"></ol>
+  </section>
+</section>
+{% endblock %}
