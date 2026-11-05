@@ -9,6 +9,9 @@ are required for private pages and APIs.
 - `GET /healthz` — public health check.
 - `GET /api/services` — authenticated list of enabled services.
 - `GET /api/diagnostics/outbound` — authenticated outbound connectivity diagnostics.
+- `GET /api/wikipedia/v1/search?q=neural+networks&lang=en&limit=5` — authenticated Wikipedia article search.
+- `GET /api/wikipedia/v1/page?title=Neural+network&lang=en` — authenticated article metadata and plain-text extract.
+- `GET /api/wikipedia/v1/diagnostics` — authenticated Wikipedia API connectivity check.
 - `GET /diagnostics` — diagnostics page for logged-in browser sessions.
 - `GET /chat` — authenticated browser chat interface.
 - `GET /api/ai/v1/conversations` — list the logged-in browser user's conversations.
@@ -24,6 +27,32 @@ Non-streaming responses use an OpenAI-style completion body. Streaming requests 
 Server-Sent Events (`text/event-stream`) with OpenAI-compatible completion chunks and
 terminate with `data: [DONE]`. Tool/function calls and image/audio inputs are not
 supported.
+
+## Wikipedia API
+
+The independent Wikipedia service uses the official MediaWiki API and requires no API
+key. It is disabled by default; set `WIKIPEDIA_ENABLED=1` to enable it. If
+`ENABLED_SERVICES` is non-empty, it must also include `wikipedia`.
+
+Search accepts `q` (required, up to 300 characters), `lang` (defaults to `en`), and
+`limit` (defaults to 5; allowed range 1–20). Page retrieval accepts `title` (required,
+up to 300 characters) and `lang`. Language codes are lowercase MediaWiki project
+codes, including `en` and `fa` for English and Persian. Both endpoints return
+deterministic JSON; search snippets are plain text, and page results include a plain
+text article extract, canonical URL, page ID, and available page metadata. Search
+responses have the shape `{"query":"...","language":"en","count":1,"results":[...]}`;
+page responses have the shape
+`{"page":{"pageid":1,"title":"...","language":"en","url":"...","extract":"..."}}`.
+No search results produce an empty `results` list. Missing pages return HTTP 404;
+invalid parameters return HTTP 400; upstream and malformed-response errors return
+HTTP 502, upstream timeouts return HTTP 504, and more than 60 requests per minute
+per client IP return HTTP 429. The service caches successful
+responses using the shared in-memory TTL cache. Requests require the same browser
+session or Bearer API token as the rest of the private API.
+
+For PythonAnywhere deployments, ensure outbound access is available to the selected
+Wikipedia language subdomain (for example, `en.wikipedia.org` or `fa.wikipedia.org`).
+The service uses the shared HTTP client and does not require an additional package.
 
 ## Authentication
 

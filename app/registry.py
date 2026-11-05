@@ -32,6 +32,9 @@ def init_services(flask_app: Flask, ctx: AppContext) -> None:
     for cls in _discover():
         if not cls.name:
             raise RuntimeError(f"{cls.__name__} must define a `name`")
+        if not getattr(ctx.config, f"{cls.name}_enabled", True):
+            log.info("service disabled: %s", cls.name)
+            continue
         if enabled and cls.name not in enabled:
             continue
         ctx.services[cls.name] = cls(ctx)
