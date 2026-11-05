@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block title %}DuckDuckGo Search · Mirror{% endblock %}
+{% block head %}
+<link rel="stylesheet" href="{{ url_for('static', filename='duckduckgo.css') }}">
+<script src="{{ url_for('static', filename='duckduckgo.js') }}" defer></script>
+{% endblock %}
+{% block body_class %}duckduckgo-page{% endblock %}
+{% block content %}
+<section class="duckduckgo" id="duckduckgo"
+         data-search-url="{{ url_for('duckduckgo.search') }}">
+  <h1>DuckDuckGo Web Search</h1>
+  <p class="muted">Unofficial DuckDuckGo web results. Search availability may vary.</p>
+
+  <form id="duckduckgo-search-form">
+    <label for="duckduckgo-query">Search query</label>
+    <input id="duckduckgo-query" name="q" type="search" maxlength="500"
+           required autocomplete="off" placeholder="What are you looking for?">
+
+    <div class="duckduckgo-options">
+      <div>
+        <label for="duckduckgo-limit">Results</label>
+        <select id="duckduckgo-limit" name="limit">
+          <option value="5" selected>5</option>
+          <option value="10">10</option>
+          <option value="20">20</option>
+        </select>
+      </div>
+      <div>
+        <label for="duckduckgo-region">Region / language</label>
+        <select id="duckduckgo-region" name="region">
+          <option value="us-en" selected>United States · English</option>
+          <option value="uk-en">United Kingdom · English</option>
+          <option value="ca-en">Canada · English</option>
+          <option value="de-de">Germany · German</option>
+          <option value="fr-fr">France · French</option>
+          <option value="wt-wt">Worldwide</option>
+        </select>
+      </div>
+      <div>
+        <label for="duckduckgo-safesearch">Safe search</label>
+        <select id="duckduckgo-safesearch" name="safesearch">
+          <option value="moderate" selected>Moderate</option>
+          <option value="on">Strict</option>
+          <option value="off">Off</option>
+        </select>
+      </div>
+    </div>
+    <button id="duckduckgo-search-submit" type="submit">Search DuckDuckGo</button>
+  </form>
+
+  <p id="duckduckgo-status" class="duckduckgo-status" role="status"
+     aria-live="polite"></p>
+  <p id="duckduckgo-error" class="err" role="alert" hidden></p>
+  <section id="duckduckgo-results" aria-label="DuckDuckGo search results" hidden>
+    <h2 id="duckduckgo-results-heading">Results</h2>
+    <ol id="duckduckgo-result-list"></ol>
+  </section>
+</section>
+{% endblock %}

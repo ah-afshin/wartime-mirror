@@ -47,6 +47,7 @@ class DuckDuckGoService(Service):
     name = "duckduckgo"
     title = "DuckDuckGo Web Search"
     description = "Unofficial DuckDuckGo text search using the direct DuckDuckGo backend."
+    home_endpoint = "duckduckgo.ui"
 
     def search(self, query: str, limit: int = DEFAULT_SEARCH_LIMIT,
                region: str = DEFAULT_REGION, language: str | None = None,

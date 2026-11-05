@@ -11,12 +11,14 @@ are required for private pages and APIs.
 - `GET /api/diagnostics/outbound` — authenticated outbound connectivity diagnostics.
 - `GET /api/duckduckgo/v1/search?q=python&limit=5` — authenticated DuckDuckGo web search.
 - `GET /api/duckduckgo/v1/diagnostics` — authenticated DuckDuckGo integration diagnostics.
+- `GET /duckduckgo` — authenticated DuckDuckGo search page.
 - `GET /api/google-search/v1/search?q=python&limit=5` — authenticated Google web search.
 - `GET /api/google-search/v1/diagnostics` — authenticated Google Search configuration and quota diagnostics.
 - `GET /google-search` — authenticated Google Search browser page.
 - `GET /api/wikipedia/v1/search?q=neural+networks&lang=en&limit=5` — authenticated Wikipedia article search.
 - `GET /api/wikipedia/v1/page?title=Neural+network&lang=en` — authenticated article metadata and plain-text extract.
 - `GET /api/wikipedia/v1/diagnostics` — authenticated Wikipedia API connectivity check.
+- `GET /wikipedia` — authenticated Wikipedia search and article page.
 - `GET /diagnostics` — diagnostics page for logged-in browser sessions.
 - `GET /chat` — authenticated browser chat interface.
 - `GET /api/ai/v1/conversations` — list the logged-in browser user's conversations.
@@ -58,6 +60,9 @@ session or Bearer API token as the rest of the private API.
 For PythonAnywhere deployments, ensure outbound access is available to the selected
 Wikipedia language subdomain (for example, `en.wikipedia.org` or `fa.wikipedia.org`).
 The service uses the shared HTTP client and does not require an additional package.
+The authenticated `/wikipedia` page provides an English/Persian search form, lets you
+select an article from the results, and displays its plain-text extract, metadata, and
+canonical Wikipedia link. It calls only the independent Wikipedia API described above.
 
 ## DuckDuckGo Search API
 
@@ -85,6 +90,9 @@ they do not guarantee current upstream availability.
 `ddgs` 9.16.1 supports Python 3.10–3.14. It is an unofficial integration that may be
 rate-limited or disrupted by changes to DuckDuckGo; search availability is not
 guaranteed. Ensure deployment hosts can reach the provider.
+The authenticated `/duckduckgo` page provides query, result-count, country, language,
+and safe-search controls, then displays results from only the DuckDuckGo service API.
+It does not submit searches to another provider.
 
 ## Google Search API
 

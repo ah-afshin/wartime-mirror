@@ -1,9 +1,9 @@
-from flask import Blueprint, current_app, jsonify, request
+from flask import Blueprint, current_app, jsonify, render_template, request
 
 from app.core.errors import ServiceError
 from app.core.ratelimit import RequestLimiter
 
-bp = Blueprint("wikipedia", __name__, url_prefix="/api/wikipedia/v1")
+bp = Blueprint("wikipedia", __name__)
 _limiter = RequestLimiter(max_requests=60, window=60)
 
 
@@ -18,7 +18,7 @@ def _check_rate_limit():
     return None
 
 
-@bp.get("/search")
+@bp.get("/api/wikipedia/v1/search")
 def search():
     limited = _check_rate_limit()
     if limited is not None:
@@ -36,7 +36,7 @@ def search():
     ))
 
 
-@bp.get("/page")
+@bp.get("/api/wikipedia/v1/page")
 def page():
     limited = _check_rate_limit()
     if limited is not None:
@@ -47,9 +47,14 @@ def page():
     ))
 
 
-@bp.get("/diagnostics")
+@bp.get("/api/wikipedia/v1/diagnostics")
 def diagnostics():
     limited = _check_rate_limit()
     if limited is not None:
         return limited
     return jsonify(_service().diagnostics())
+
+
+@bp.get("/wikipedia")
+def ui():
+    return render_template("wikipedia.html")

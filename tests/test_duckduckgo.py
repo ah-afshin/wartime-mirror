@@ -235,6 +235,27 @@ class DuckDuckGoApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 401)
         self.ddgs.assert_not_called()
 
+    def test_dedicated_ui_page_is_authenticated_and_linked_from_home(self):
+        response = self.client.get("/duckduckgo")
+        self.assertEqual(response.status_code, 302)
+
+        response = self.client.get("/duckduckgo", headers=auth_headers())
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Safe search", response.data)
+        self.assertIn(b"duckduckgo.js", response.data)
+        self.assertIn(b"/api/duckduckgo/v1/search", response.data)
+
+        home = self.client.get("/", headers=auth_headers())
+        self.assertIn(b"DuckDuckGo Web Search", home.data)
+        self.assertIn(b"/duckduckgo", home.data)
+
+    def test_existing_api_urls_remain_registered(self):
+        response = self.client.get(
+            "/api/duckduckgo/v1/search?q=python",
+            headers=auth_headers(),
+        )
+        self.assertEqual(response.status_code, 200)
+
     def test_disabled_service_is_not_instantiated_or_registered(self):
         app = make_app(duckduckgo_enabled=False)
         self.addCleanup(app.extensions["database"].dispose)
@@ -246,6 +267,7 @@ class DuckDuckGoApiTests(unittest.TestCase):
             headers=auth_headers(),
         )
         self.assertEqual(response.status_code, 404)
+        self.assertEqual(client.get("/duckduckgo").status_code, 404)
 
     def test_feature_flag_loads_from_environment_and_defaults_off(self):
         self.assertFalse(Config(env="testing").duckduckgo_enabled)

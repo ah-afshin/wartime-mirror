@@ -98,6 +98,28 @@ class WikipediaApiTests(unittest.TestCase):
         self.assertEqual(kwargs["params"]["srsearch"], "neural networks")
         self.assertEqual(kwargs["params"]["srlimit"], 5)
 
+    def test_dedicated_ui_page_is_authenticated_and_linked_from_home(self):
+        response = self.client.get("/wikipedia")
+        self.assertEqual(response.status_code, 302)
+
+        response = self.client.get("/wikipedia", headers=auth_headers())
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"Persian", response.data)
+        self.assertIn(b"wikipedia.js", response.data)
+        self.assertIn(b"/api/wikipedia/v1/search", response.data)
+
+        home = self.client.get("/", headers=auth_headers())
+        self.assertIn(b"Wikipedia", home.data)
+        self.assertIn(b"/wikipedia", home.data)
+
+    def test_existing_api_urls_remain_registered(self):
+        self.upstream.return_value = search_response()
+        response = self.client.get(
+            "/api/wikipedia/v1/search?q=neural+network",
+            headers=auth_headers(),
+        )
+        self.assertEqual(response.status_code, 200)
+
     def test_search_supports_persian_language(self):
         self.upstream.return_value = {
             "query": {
@@ -332,6 +354,7 @@ class WikipediaApiTests(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 404)
+        self.assertEqual(client.get("/wikipedia").status_code, 404)
 
     def test_feature_flag_loads_from_environment_and_defaults_off(self):
         self.assertFalse(Config(env="testing").wikipedia_enabled)

@@ -58,6 +58,7 @@ class WikipediaService(Service):
     name = "wikipedia"
     title = "Wikipedia"
     description = "Search Wikipedia and retrieve readable article extracts."
+    home_endpoint = "wikipedia.ui"
 
     def _api_url(self, language: str) -> str:
         return f"https://{language}.wikipedia.org/w/api.php"
