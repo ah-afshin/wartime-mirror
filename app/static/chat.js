@@ -64,6 +64,70 @@
     return data;
   }
 
+  async function consumeEventStream(response, onData) {
+    if (!response.body || typeof response.body.getReader !== "function") {
+      throw new Error("The browser could not read the streaming response.");
+    }
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let dataLines = [];
+    let firstText = true;
+
+    function processLine(line) {
+      if (!line) {
+        if (dataLines.length) {
+          onData(dataLines.join("\n"));
+          dataLines = [];
+        }
+        return;
+      }
+      if (line.startsWith(":")) return;
+      const separator = line.indexOf(":");
+      const field = separator < 0 ? line : line.slice(0, separator);
+      let value = separator < 0 ? "" : line.slice(separator + 1);
+      if (value.startsWith(" ")) value = value.slice(1);
+      if (field === "data") dataLines.push(value);
+    }
+
+    function processText(text, final = false) {
+      if (firstText && text) {
+        firstText = false;
+        if (text.startsWith("\uFEFF")) text = text.slice(1);
+      }
+      buffer += text;
+      while (true) {
+        const lineFeed = buffer.indexOf("\n");
+        const carriageReturn = buffer.indexOf("\r");
+        const lineEnd = lineFeed < 0
+          ? carriageReturn
+          : carriageReturn < 0 ? lineFeed : Math.min(lineFeed, carriageReturn);
+        if (lineEnd < 0 || (!final && buffer[lineEnd] === "\r" && lineEnd === buffer.length - 1)) break;
+        const line = buffer.slice(0, lineEnd);
+        const separatorLength = buffer[lineEnd] === "\r" && buffer[lineEnd + 1] === "\n" ? 2 : 1;
+        buffer = buffer.slice(lineEnd + separatorLength);
+        processLine(line);
+      }
+      if (final && buffer) {
+        processLine(buffer);
+        buffer = "";
+      }
+    }
+
+    try {
+      while (true) {
+        const { value, done } = await reader.read();
+        processText(done ? decoder.decode() : decoder.decode(value, { stream: true }), done);
+        if (done) break;
+      }
+    } catch (error) {
+      await reader.cancel().catch(() => {});
+      throw error;
+    } finally {
+      reader.releaseLock();
+    }
+  }
+
   function selectedModel() {
     return state.activeConversation?.model || state.draftModel;
   }
@@ -414,42 +478,61 @@
     const hasMessages = state.messages.length > 0;
     elements.welcome.hidden = hasMessages;
     for (const message of state.messages) {
-      const article = document.createElement("article");
-      article.className = `message message-${message.role}`;
-      const avatar = document.createElement("div");
-      avatar.className = "message-avatar";
-      avatar.setAttribute("aria-hidden", "true");
-      avatar.textContent = message.role === "assistant" ? "M" : "You";
-      const main = document.createElement("div");
-      main.className = "message-main";
-      const heading = document.createElement("div");
-      heading.className = "message-heading";
-      const author = document.createElement("span");
-      author.className = "message-author";
-      author.textContent = message.role === "assistant" ? "Mirror" : "You";
-      heading.append(author);
-      const time = document.createElement("time");
-      time.className = "message-time";
-      time.dateTime = message.created_at || "";
-      time.textContent = formatTimestamp(message.created_at);
-      heading.append(time);
-      if (message.role === "assistant") {
-        const copy = document.createElement("button");
-        copy.type = "button";
-        copy.className = "message-copy";
-        copy.textContent = "Copy";
-        copy.addEventListener("click", () => copyText(message.content || "", copy));
-        heading.append(copy);
-      }
-      const body = document.createElement("div");
-      body.className = "message-body";
-      appendMarkdown(body, message.content || "");
-      main.append(heading, body);
-      article.append(avatar, main);
-      elements.messages.append(article);
+      elements.messages.append(createMessageArticle(message));
     }
     if (shouldScroll) {
       requestAnimationFrame(() => { elements.scroll.scrollTop = elements.scroll.scrollHeight; });
+    }
+  }
+
+  function createMessageArticle(message) {
+    const article = document.createElement("article");
+    article.className = `message message-${message.role}`;
+    const avatar = document.createElement("div");
+    avatar.className = "message-avatar";
+    avatar.setAttribute("aria-hidden", "true");
+    avatar.textContent = message.role === "assistant" ? "M" : "You";
+    const main = document.createElement("div");
+    main.className = "message-main";
+    const heading = document.createElement("div");
+    heading.className = "message-heading";
+    const author = document.createElement("span");
+    author.className = "message-author";
+    author.textContent = message.role === "assistant" ? "Mirror" : "You";
+    heading.append(author);
+    const time = document.createElement("time");
+    time.className = "message-time";
+    time.dateTime = message.created_at || "";
+    time.textContent = formatTimestamp(message.created_at);
+    heading.append(time);
+    if (message.role === "assistant") {
+      const status = document.createElement("span");
+      status.className = "message-status";
+      heading.append(status);
+      const copy = document.createElement("button");
+      copy.type = "button";
+      copy.className = "message-copy";
+      copy.textContent = "Copy";
+      copy.addEventListener("click", () => copyText(message.content || "", copy));
+      heading.append(copy);
+    }
+    const body = document.createElement("div");
+    body.className = "message-body";
+    main.append(heading, body);
+    article.append(avatar, main);
+    updateMessageArticle(article, message);
+    return article;
+  }
+
+  function updateMessageArticle(article, message) {
+    const body = article.querySelector(".message-body");
+    body.replaceChildren();
+    appendMarkdown(body, message.content || "");
+    const status = article.querySelector(".message-status");
+    if (status) {
+      status.textContent = message.status === "streaming" ? "Generating…"
+        : message.status === "incomplete" ? "Response incomplete"
+          : message.status === "failed" ? "Response failed" : "";
     }
   }
 
@@ -673,6 +756,8 @@
     state.sending = true;
     const selection = state.selection;
     let conversationId = state.activeId;
+    let assistantMessage = null;
+    let updateStreamView = () => {};
     renderComposerState();
 
     try {
@@ -697,34 +782,145 @@
         id: `pending-${Date.now()}`,
         role: "user",
         content,
+        status: "complete",
         created_at: new Date().toISOString(),
       };
       if (selection === state.selection && conversationId === state.activeId) {
         state.messages.push(optimistic);
         renderMessages(true);
       }
-      await loadConversations();
-      await request(`${apiRoot}/${encodeURIComponent(conversationId)}/messages`, {
-        method: "POST",
-        body: JSON.stringify({ content }),
+      const headers = new Headers({
+        "Content-Type": "application/json",
+        "X-CSRF-Token": csrfToken,
       });
+      const response = await fetch(
+        `${apiRoot}/${encodeURIComponent(conversationId)}/messages/stream`,
+        {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ content }),
+          credentials: "same-origin",
+        },
+      );
+      if (!response.ok) {
+        const data = await response.json().catch(() => null);
+        const error = data?.error;
+        const message = typeof error === "string" ? error : error?.message;
+        throw new Error(message || data?.message || `Request failed (${response.status})`);
+      }
+
       elements.input.value = "";
       resizeInput();
-      if (selection === state.selection && conversationId === state.activeId) {
-        await loadConversation(conversationId);
+      assistantMessage = {
+        id: `streaming-${Date.now()}`,
+        role: "assistant",
+        content: "",
+        model: selectedModel(),
+        status: "streaming",
+        created_at: new Date().toISOString(),
+      };
+      const showStream = selection === state.selection && conversationId === state.activeId;
+      let assistantArticle = null;
+      if (showStream) {
+        state.messages.push(assistantMessage);
+        renderMessages(true);
+        assistantArticle = elements.messages.lastElementChild;
       }
-      await loadConversations();
+
+      let renderFrame = null;
+      updateStreamView = (flush = false) => {
+        if (!assistantArticle) return;
+        if (!flush && renderFrame !== null) return;
+        if (renderFrame !== null) {
+          cancelAnimationFrame(renderFrame);
+          renderFrame = null;
+        }
+        const update = () => {
+          renderFrame = null;
+          const shouldScroll = elements.scroll.scrollHeight - elements.scroll.scrollTop
+            - elements.scroll.clientHeight < 120;
+          updateMessageArticle(assistantArticle, assistantMessage);
+          if (shouldScroll) elements.scroll.scrollTop = elements.scroll.scrollHeight;
+        };
+        if (flush) update();
+        else renderFrame = requestAnimationFrame(update);
+      };
+
+      let sawDone = false;
+      let streamFailure = "";
+      await consumeEventStream(response, (eventData) => {
+        if (sawDone) throw new Error("The AI stream returned data after completion.");
+        if (eventData.trim() === "[DONE]") {
+          sawDone = true;
+          return;
+        }
+        let data;
+        try {
+          data = JSON.parse(eventData);
+        } catch {
+          throw new Error("The AI stream returned a malformed event.");
+        }
+        if (!data || typeof data !== "object" || Array.isArray(data)) {
+          throw new Error("The AI stream returned a malformed event.");
+        }
+        if (Object.prototype.hasOwnProperty.call(data, "error")) {
+          if (!data.error || typeof data.error !== "object" || Array.isArray(data.error)) {
+            throw new Error("The AI stream returned a malformed error.");
+          }
+          const message = typeof data.error.message === "string"
+            ? data.error.message : "The AI stream returned an error.";
+          const code = data.error.code;
+          if (code === "malformed_stream") {
+            streamFailure = `The AI stream was malformed: ${message}`;
+          } else if (["stream_interrupted", "upstream_disconnected", "upstream_timeout"].includes(code)) {
+            streamFailure = `The AI stream was interrupted: ${message}`;
+          } else if (code === "persistence_failed") {
+            streamFailure = `The assistant response could not be saved: ${message}`;
+          } else {
+            streamFailure = `The AI provider could not complete the response: ${message}`;
+          }
+          return;
+        }
+        if (!Array.isArray(data.choices)) {
+          throw new Error("The AI stream returned a malformed completion chunk.");
+        }
+        const choice = data.choices[0];
+        if (!choice) return;
+        if (!choice.delta || typeof choice.delta !== "object" || Array.isArray(choice.delta)) {
+          throw new Error("The AI stream returned a malformed content delta.");
+        }
+        if (choice.delta.content !== undefined) {
+          if (typeof choice.delta.content !== "string") {
+            throw new Error("The AI stream returned invalid assistant text.");
+          }
+          assistantMessage.content += choice.delta.content;
+          updateStreamView();
+        }
+      });
+      updateStreamView(true);
+      if (!sawDone) throw new Error("The AI stream ended before completion.");
+      if (streamFailure) throw new Error(streamFailure);
+      assistantMessage.status = "complete";
+      updateStreamView(true);
     } catch (error) {
-      setError(`Message was not completed: ${error.message}. Your text is still available in the composer.`);
+      if (assistantMessage) {
+        assistantMessage.status = assistantMessage.content ? "incomplete" : "failed";
+        updateStreamView(true);
+      }
+      setError(`Message was not completed: ${error.message}`);
+    } finally {
       if (conversationId && selection === state.selection && conversationId === state.activeId) {
         try {
           await loadConversation(conversationId);
-        } catch {
-          renderMessages();
+        } catch (error) {
+          if (!elements.error.hidden) {
+            setError(`${elements.error.textContent}. Could not refresh the conversation: ${error.message}`);
+          } else {
+            setError(`Could not refresh the conversation: ${error.message}`);
+          }
         }
       }
       await loadConversations();
-    } finally {
       state.sending = false;
       renderModelSelector();
       renderComposerState();

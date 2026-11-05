@@ -1,3 +1,4 @@
+import json
 import unittest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
@@ -23,6 +24,11 @@ MODEL_LIST = {
         {"id": "mistral", "configured": True, "available": True, "models": ["mistral/model-b"]},
     ],
 }
+
+
+def stream_chunk(content):
+    payload = {"choices": [{"index": 0, "delta": {"content": content}, "finish_reason": None}]}
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
 class ConversationAPITests(unittest.TestCase):
@@ -362,6 +368,345 @@ class ConversationAPITests(unittest.TestCase):
             self.assertEqual(assistant.model, "groq/model-a")
             self.assertEqual(assistant.status, "complete")
 
+    def test_streamed_message_persists_chunks_and_completes_only_at_done(self):
+        client = self.login("alice")
+        payloads = []
+        stream_chunks = [
+            stream_chunk("سلام "),
+            stream_chunk("world"),
+            "data: [DONE]\n\n",
+        ]
+
+        def stream(payload):
+            payloads.append(payload)
+            with self.database.session_scope() as db_session:
+                before = db_session.scalars(
+                    select(Message)
+                    .where(Message.conversation_id == self.alice_conversation_id)
+                    .order_by(Message.id)
+                ).all()
+                self.assertEqual(before[-1].role, "assistant")
+                self.assertEqual(before[-1].status, "streaming")
+                self.assertEqual(before[-1].content, "")
+                self.assertEqual(before[-2].role, "user")
+                self.assertEqual(before[-2].status, "complete")
+            yield from stream_chunks
+
+        with patch.object(self.ai_service, "stream", side_effect=stream), \
+                patch.object(self.ai_service, "complete", side_effect=AssertionError("non-stream path used")):
+            response = client.post(
+                f"/api/ai/v1/conversations/{self.alice_conversation_id}/messages/stream",
+                json={"content": "Explain streaming"},
+                headers={"X-CSRF-Token": self.csrf(client)},
+                buffered=False,
+            )
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.mimetype, "text/event-stream")
+            self.assertEqual(response.headers["Cache-Control"], "no-cache, no-transform")
+            self.assertEqual(response.headers["X-Accel-Buffering"], "no")
+            first = next(response.response).decode()
+            self.assertIn('"content":"سلام "', first)
+            with self.database.session_scope() as db_session:
+                assistant = db_session.scalar(
+                    select(Message)
+                    .where(
+                        Message.conversation_id == self.alice_conversation_id,
+                        Message.role == "assistant",
+                    )
+                    .order_by(Message.id.desc())
+                )
+                self.assertEqual(assistant.status, "streaming")
+                self.assertEqual(assistant.content, "سلام ")
+            rest = b"".join(response.response).decode()
+            response.close()
+
+        self.assertIn('"content":"world"', rest)
+        self.assertTrue(rest.endswith("data: [DONE]\n\n"))
+        self.assertEqual(payloads[0]["model"], "groq/model-a")
+        self.assertEqual(
+            payloads[0]["messages"][-1],
+            {"role": "user", "content": "Explain streaming"},
+        )
+        with self.database.session_scope() as db_session:
+            messages = db_session.scalars(
+                select(Message)
+                .where(Message.conversation_id == self.alice_conversation_id)
+                .order_by(Message.id)
+            ).all()
+        self.assertEqual(messages[-2].content, "Explain streaming")
+        self.assertEqual(messages[-2].status, "complete")
+        self.assertEqual(messages[-1].content, "سلام world")
+        self.assertEqual(messages[-1].model, "groq/model-a")
+        self.assertEqual(messages[-1].status, "complete")
+
+    def test_stream_provider_rejection_keeps_user_and_marks_assistant_failed(self):
+        client = self.login("alice")
+        provider_error = AIError("Provider unavailable", 503, "provider_unavailable")
+
+        with patch.object(self.ai_service, "stream", side_effect=provider_error):
+            response = client.post(
+                f"/api/ai/v1/conversations/{self.alice_conversation_id}/messages/stream",
+                json={"content": "Keep this streamed question"},
+                headers={"X-CSRF-Token": self.csrf(client)},
+            )
+
+        self.assertEqual(response.status_code, 503)
+        with self.database.session_scope() as db_session:
+            messages = db_session.scalars(
+                select(Message)
+                .where(Message.conversation_id == self.alice_conversation_id)
+                .order_by(Message.id)
+            ).all()
+        self.assertEqual(messages[-2].role, "user")
+        self.assertEqual(messages[-2].content, "Keep this streamed question")
+        self.assertEqual(messages[-2].status, "complete")
+        self.assertEqual(messages[-1].role, "assistant")
+        self.assertEqual(messages[-1].status, "failed")
+        self.assertEqual(messages[-1].content, "")
+
+    def test_stream_error_after_partial_output_persists_incomplete_response(self):
+        client = self.login("alice")
+        chunks = [
+            stream_chunk("partial "),
+            stream_chunk("answer after "),
+            stream_chunk("several chunks"),
+            'data: {"error":{"message":"Provider failed","type":"server_error","code":"provider_unavailable"}}\n\n',
+            "data: [DONE]\n\n",
+        ]
+        with patch.object(self.ai_service, "stream", return_value=iter(chunks)):
+            response = client.post(
+                f"/api/ai/v1/conversations/{self.alice_conversation_id}/messages/stream",
+                json={"content": "Question"},
+                headers={"X-CSRF-Token": self.csrf(client)},
+                buffered=False,
+            )
+            body = b"".join(response.response).decode()
+            response.close()
+
+        self.assertIn('"code":"provider_unavailable"', body)
+        self.assertTrue(body.endswith("data: [DONE]\n\n"))
+        with self.database.session_scope() as db_session:
+            assistant = db_session.scalar(
+                select(Message)
+                .where(
+                    Message.conversation_id == self.alice_conversation_id,
+                    Message.role == "assistant",
+                )
+                .order_by(Message.id.desc())
+            )
+        self.assertEqual(assistant.content, "partial answer after several chunks")
+        self.assertEqual(assistant.status, "incomplete")
+
+    def test_upstream_exception_after_chunks_persists_partial_as_incomplete(self):
+        client = self.login("alice")
+
+        def disconnected():
+            yield stream_chunk("first ")
+            yield stream_chunk("second ")
+            yield stream_chunk("third")
+            raise RuntimeError("private upstream failure")
+
+        with patch.object(self.ai_service, "stream", return_value=disconnected()):
+            response = client.post(
+                f"/api/ai/v1/conversations/{self.alice_conversation_id}/messages/stream",
+                json={"content": "Disconnect after output"},
+                headers={"X-CSRF-Token": self.csrf(client)},
+                buffered=False,
+            )
+            body = b"".join(response.response).decode()
+            response.close()
+
+        self.assertIn('"code":"upstream_disconnected"', body)
+        self.assertNotIn("private upstream failure", body)
+        with self.database.session_scope() as db_session:
+            assistant = db_session.scalar(
+                select(Message)
+                .where(
+                    Message.conversation_id == self.alice_conversation_id,
+                    Message.role == "assistant",
+                )
+                .order_by(Message.id.desc())
+            )
+        self.assertEqual(assistant.content, "first second third")
+        self.assertEqual(assistant.status, "incomplete")
+
+    def test_stream_without_done_or_with_malformed_event_is_not_complete(self):
+        cases = (
+            ("missing terminal", [stream_chunk("partial")], "stream_interrupted"),
+            ("malformed event", [stream_chunk("partial"), "data: {broken}\n\n"], "malformed_stream"),
+        )
+        for label, chunks, code in cases:
+            with self.subTest(label=label):
+                client = self.login("alice")
+                with patch.object(self.ai_service, "stream", return_value=iter(chunks)):
+                    response = client.post(
+                        f"/api/ai/v1/conversations/{self.alice_conversation_id}/messages/stream",
+                        json={"content": label},
+                        headers={"X-CSRF-Token": self.csrf(client)},
+                        buffered=False,
+                    )
+                    body = b"".join(response.response).decode()
+                    response.close()
+                self.assertIn(f'"code":"{code}"', body)
+                with self.database.session_scope() as db_session:
+                    assistant = db_session.scalar(
+                        select(Message)
+                        .where(
+                            Message.conversation_id == self.alice_conversation_id,
+                            Message.role == "assistant",
+                        )
+                        .order_by(Message.id.desc())
+                    )
+                self.assertEqual(assistant.status, "incomplete")
+                self.assertEqual(assistant.content, "partial")
+
+    def test_stream_disconnect_persists_partial_content_and_closes_upstream(self):
+        client = self.login("alice")
+        closed = []
+
+        def stream():
+            try:
+                yield stream_chunk("partial answer")
+                yield stream_chunk("not delivered")
+            finally:
+                closed.append(True)
+
+        with patch.object(self.ai_service, "stream", return_value=stream()):
+            response = client.post(
+                f"/api/ai/v1/conversations/{self.alice_conversation_id}/messages/stream",
+                json={"content": "Disconnect test"},
+                headers={"X-CSRF-Token": self.csrf(client)},
+                buffered=False,
+            )
+            first = next(response.response).decode()
+            self.assertIn('"content":"partial answer"', first)
+            response.close()
+
+        self.assertEqual(closed, [True])
+        with self.database.session_scope() as db_session:
+            assistant = db_session.scalar(
+                select(Message)
+                .where(
+                    Message.conversation_id == self.alice_conversation_id,
+                    Message.role == "assistant",
+                )
+                .order_by(Message.id.desc())
+            )
+        self.assertEqual(assistant.content, "partial answer")
+        self.assertEqual(assistant.status, "incomplete")
+
+    def test_stream_closed_before_first_chunk_marks_placeholder_failed(self):
+        client = self.login("alice")
+
+        class CloseTrackingStream:
+            closed = False
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                return stream_chunk("not consumed")
+
+            def close(self):
+                self.closed = True
+
+        stream = CloseTrackingStream()
+        with patch.object(self.ai_service, "stream", return_value=stream):
+            response = client.post(
+                f"/api/ai/v1/conversations/{self.alice_conversation_id}/messages/stream",
+                json={"content": "Close before reading"},
+                headers={"X-CSRF-Token": self.csrf(client)},
+                buffered=False,
+            )
+            response.close()
+
+        self.assertTrue(stream.closed)
+        with self.database.session_scope() as db_session:
+            assistant = db_session.scalar(
+                select(Message)
+                .where(
+                    Message.conversation_id == self.alice_conversation_id,
+                    Message.role == "assistant",
+                )
+                .order_by(Message.id.desc())
+            )
+        self.assertIn(assistant.status, {"failed", "incomplete"})
+
+    def test_uniterated_stream_response_close_finalizes_placeholder(self):
+        from app.routes.ai import _message_stream_response
+
+        with self.database.session_scope() as db_session:
+            assistant = Message(
+                conversation_id=self.alice_conversation_id,
+                role="assistant",
+                content="",
+                model="groq/model-a",
+                status="streaming",
+            )
+            db_session.add(assistant)
+            db_session.flush()
+            assistant_id = assistant.id
+
+        class CloseTrackingStream:
+            closed = False
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                return stream_chunk("not consumed")
+
+            def close(self):
+                self.closed = True
+
+        stream = CloseTrackingStream()
+        response = _message_stream_response(
+            stream, self.database, self.alice_conversation_id, assistant_id
+        )
+        response.close()
+
+        self.assertTrue(stream.closed)
+        with self.database.session_scope() as db_session:
+            assistant = db_session.get(Message, assistant_id)
+        self.assertEqual(assistant.status, "failed")
+
+    def test_stream_persistence_failure_is_reported_and_partial_text_is_retained(self):
+        client = self.login("alice")
+        from app.routes.ai import _persist_stream_message
+
+        original_persist = _persist_stream_message
+
+        def fail_incremental_once(database, conversation_id, message_id, content, status):
+            if status == "streaming":
+                raise RuntimeError("simulated write failure")
+            original_persist(database, conversation_id, message_id, content, status)
+
+        with patch.object(self.ai_service, "stream", return_value=iter([
+            stream_chunk("partial response"),
+            "data: [DONE]\n\n",
+        ])), patch("app.routes.ai._persist_stream_message", side_effect=fail_incremental_once):
+            response = client.post(
+                f"/api/ai/v1/conversations/{self.alice_conversation_id}/messages/stream",
+                json={"content": "Persistence test"},
+                headers={"X-CSRF-Token": self.csrf(client)},
+                buffered=False,
+            )
+            body = b"".join(response.response).decode()
+            response.close()
+
+        self.assertIn('"code":"persistence_failed"', body)
+        with self.database.session_scope() as db_session:
+            assistant = db_session.scalar(
+                select(Message)
+                .where(
+                    Message.conversation_id == self.alice_conversation_id,
+                    Message.role == "assistant",
+                )
+                .order_by(Message.id.desc())
+            )
+        self.assertEqual(assistant.content, "partial response")
+        self.assertEqual(assistant.status, "incomplete")
+
     def test_first_message_sets_deterministic_title(self):
         with self.database.session_scope() as db_session:
             conversation = Conversation(
@@ -504,9 +849,15 @@ class ConversationAPITests(unittest.TestCase):
     def test_message_access_is_owner_scoped_and_requires_browser_session(self):
         bob = self.login("bob")
         url = f"/api/ai/v1/conversations/{self.alice_conversation_id}/messages"
+        stream_url = f"{url}/stream"
 
         forbidden = bob.post(
             url,
+            json={"content": "Not mine"},
+            headers={"X-CSRF-Token": self.csrf(bob)},
+        )
+        stream_forbidden = bob.post(
+            stream_url,
             json={"content": "Not mine"},
             headers={"X-CSRF-Token": self.csrf(bob)},
         )
@@ -518,9 +869,19 @@ class ConversationAPITests(unittest.TestCase):
                 "X-CSRF-Token": "irrelevant",
             },
         )
+        stream_bearer_only = self.app.test_client().post(
+            stream_url,
+            json={"content": "No browser identity"},
+            headers={
+                "Authorization": f"******",
+                "X-CSRF-Token": "irrelevant",
+            },
+        )
 
         self.assertEqual(forbidden.status_code, 404)
+        self.assertEqual(stream_forbidden.status_code, 404)
         self.assertEqual(bearer_only.status_code, 401)
+        self.assertEqual(stream_bearer_only.status_code, 401)
 
     def test_message_endpoint_rejects_malformed_conversation_id(self):
         client = self.login("alice")

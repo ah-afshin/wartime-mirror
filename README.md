@@ -15,6 +15,7 @@ are required for private pages and APIs.
 - `POST /api/ai/v1/conversations` — create a conversation.
 - `GET`, `PATCH`, `DELETE /api/ai/v1/conversations/<id>` — retrieve, update, or delete an owned conversation.
 - `POST /api/ai/v1/conversations/<id>/messages` — save a user message and generate a non-streaming assistant response.
+- `POST /api/ai/v1/conversations/<id>/messages/stream` — save a user message and stream a persistent assistant response over SSE.
 - `POST /api/ai/v1/chat/completions` — authenticated OpenAI-compatible chat completion, streamed or non-streamed.
 - `GET /api/ai/v1/models` — authenticated model discovery for configured AI providers.
 
@@ -57,12 +58,25 @@ currently discovered model list. A discovery failure returns an error rather tha
 silently switching models. Conversation details include messages ordered by their
 database IDs. Message generation accepts JSON `{"content": "..."}`; it persists the
 user message before calling the existing AI service with the conversation's selected
-model and stored history. If generation fails, the user message remains saved and no
-assistant message is created. The first message also sets a short title from its text.
-Generation is non-streaming. The authenticated `/chat` browser interface discovers models
-from the backend and uses the conversation endpoints for all persistent history and model
-changes. User and assistant text is stored raw; the browser renders Markdown by creating
+model and stored history. For the existing non-streaming `/messages` endpoint, a
+generation failure retains the user message and does not create an assistant message.
+The first message also sets a short title from its text. The authenticated `/chat`
+browser interface discovers models from the backend and uses the conversation endpoints
+for all persistent history and model changes. User and assistant text is stored raw; the
+browser renders Markdown by creating
 DOM text and formatting nodes rather than interpreting message content as HTML.
+
+The browser chat uses the `/messages/stream` endpoint. It saves the user message as
+`complete` and creates an empty assistant message as `streaming` in a short database
+transaction before calling `AIService.stream()` with the conversation model and stored
+message history. The endpoint forwards OpenAI-compatible SSE content chunks and
+`[DONE]`; it does not call the public AI HTTP endpoint. Assistant text is persisted as
+chunks arrive. A valid `[DONE]` without an error changes the message to `complete`.
+Provider errors, malformed or interrupted streams, and browser disconnects preserve
+any received text as `incomplete` (or use `failed` if no text arrived). A provider
+rejection before the stream opens returns a normal JSON error and marks the assistant
+message `failed`; the saved user message is retained in all generation-failure cases.
+The existing `/messages` endpoint remains non-streaming.
 
 ## Layout
 
@@ -245,8 +259,9 @@ times out, or disconnects. PythonAnywhere [documents a five-minute web-worker
 timeout](https://help.pythonanywhere.com/pages/AsyncInWebApps/), but this project has
 not been deployed and tested there; SSE delivery, buffering, and client-disconnect
 behavior on PythonAnywhere remain unverified. Configure `AI_STREAM_TIMEOUT` below the
-platform worker timeout and `AI_STREAM_IDLE_TIMEOUT` for the longest acceptable wait
-between provider bytes. After deployment, test with an authenticated client:
+platform worker timeout (`240` seconds by default) and `AI_STREAM_IDLE_TIMEOUT` for the
+longest acceptable wait between provider bytes. After deployment, test with an
+authenticated client:
 
 ```bash
 curl -N https://YOUR-DOMAIN/api/ai/v1/chat/completions \
@@ -256,7 +271,15 @@ curl -N https://YOUR-DOMAIN/api/ai/v1/chat/completions \
 ```
 
 Confirm chunks arrive incrementally and test client disconnect behavior on the actual
-deployment. Local tests do not establish PythonAnywhere streaming support.
+deployment. Also sign in to the deployed `/chat`, start a persistent conversation, and
+confirm assistant text appears before generation finishes. Open that conversation's
+`GET /api/ai/v1/conversations/<id>` response to verify the final status and text. Start
+another response and close or navigate away from the tab; then retrieve the conversation
+again and confirm any saved partial assistant text has status `incomplete` (or `failed`
+if there was no output). Check that buffering is disabled and keep the configured stream
+timeout safely below the worker timeout. Local tests do not establish PythonAnywhere
+streaming support; this manual verification must be performed on the deployed
+application.
 
 ## Known limitations
 

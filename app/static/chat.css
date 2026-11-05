@@ -51,6 +51,7 @@
 .message-heading{display:flex;align-items:center;gap:10px;margin:2px 0 8px}
 .message-author{font-weight:650}
 .message-time{color:var(--chat-muted);font-size:.75rem}
+.message-status{color:var(--chat-muted);font-size:.75rem}
 .message-copy{width:auto;margin:0 0 0 auto;padding:4px 8px;border:1px solid var(--chat-line);border-radius:7px;background:transparent;color:var(--chat-muted);font-size:.75rem;cursor:pointer}
 .message-body{overflow-wrap:anywhere;line-height:1.7}
 .message-body>*:first-child{margin-top:0}

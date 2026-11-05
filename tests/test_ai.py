@@ -509,6 +509,20 @@ class AIStreamingTests(unittest.TestCase):
             result.close()
         self.assertTrue(upstream.closed)
 
+    def test_client_close_before_first_chunk_releases_upstream_response(self):
+        app = make_app()
+        upstream = StreamingResponse([
+            b'data: {"choices":[{"index":0,"delta":{"content":"first"},"finish_reason":null}]}\n\n',
+        ])
+        with patch.dict(os.environ, {"GROQ_API_KEY": KEYS["groq"][1]}), \
+                patch.object(requests.Session, "request", return_value=upstream):
+            result = app.test_client().post(
+                "/api/ai/v1/chat/completions", headers=auth_headers(),
+                json={**chat_payload("groq/model"), "stream": True}, buffered=False,
+            )
+            result.close()
+        self.assertTrue(upstream.closed)
+
     def test_stream_response_size_limit_closes_upstream(self):
         app = make_app()
         context = app.extensions["mirror"]

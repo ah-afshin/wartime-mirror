@@ -155,6 +155,34 @@ class Provider:
     base_url: str
 
 
+class _ProviderStream:
+    def __init__(self, generator, response):
+        self._generator = generator
+        self._response = response
+        self._closed = False
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self._closed:
+            raise StopIteration
+        try:
+            return next(self._generator)
+        except StopIteration:
+            self.close()
+            raise
+
+    def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self._generator.close()
+        finally:
+            self._response.close()
+
+
 class ProviderAdapter:
     def __init__(self, service: "AIService", provider: Provider):
         self.service = service
@@ -313,7 +341,7 @@ class ProviderAdapter:
                 yield "data: [DONE]\n\n"
             finally:
                 response.close()
-        return generate()
+        return _ProviderStream(generate(), response)
 
     requires_done = True
 
