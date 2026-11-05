@@ -46,6 +46,7 @@ class Config:
     login_window_seconds: int = 600
     database_url: str = field(default_factory=_default_database_url)
     wikipedia_enabled: bool = False
+    duckduckgo_enabled: bool = False
 
     @property
     def is_production(self) -> bool:
@@ -74,6 +75,7 @@ class Config:
             ai_stream_idle_timeout=float(e("AI_STREAM_IDLE_TIMEOUT", "30")),
             cache_ttl=int(e("CACHE_TTL", "300")),
             database_url=e("DATABASE_URL") or _default_database_url(),
+            duckduckgo_enabled=_flag(e("DUCKDUCKGO_ENABLED"), False),
         )
         return replace(cfg, **overrides)
 

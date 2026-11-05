@@ -9,6 +9,8 @@ are required for private pages and APIs.
 - `GET /healthz` — public health check.
 - `GET /api/services` — authenticated list of enabled services.
 - `GET /api/diagnostics/outbound` — authenticated outbound connectivity diagnostics.
+- `GET /api/duckduckgo/v1/search?q=python&limit=5` — authenticated DuckDuckGo web search.
+- `GET /api/duckduckgo/v1/diagnostics` — authenticated DuckDuckGo integration diagnostics.
 - `GET /api/wikipedia/v1/search?q=neural+networks&lang=en&limit=5` — authenticated Wikipedia article search.
 - `GET /api/wikipedia/v1/page?title=Neural+network&lang=en` — authenticated article metadata and plain-text extract.
 - `GET /api/wikipedia/v1/diagnostics` — authenticated Wikipedia API connectivity check.
@@ -53,6 +55,33 @@ session or Bearer API token as the rest of the private API.
 For PythonAnywhere deployments, ensure outbound access is available to the selected
 Wikipedia language subdomain (for example, `en.wikipedia.org` or `fa.wikipedia.org`).
 The service uses the shared HTTP client and does not require an additional package.
+
+## DuckDuckGo Search API
+
+The independent DuckDuckGo service uses the unofficial `ddgs` Python package, not an
+official DuckDuckGo search API, and requires no API key. It is disabled by default;
+set `DUCKDUCKGO_ENABLED=1` to enable it. If `ENABLED_SERVICES` is non-empty, it must
+also include `duckduckgo`. The service always explicitly selects the `duckduckgo`
+text backend; it does not use `ddgs` automatic multi-engine mode or fall back to
+other search providers.
+
+`GET /api/duckduckgo/v1/search` accepts `q` (required, up to 500 characters), `limit`
+(defaults to 5; allowed range 1–20), `region` (defaults to `us-en`), optional `lang`
+(two- or three-letter language code, replacing the region's language suffix), and
+`safesearch` (`on`, `moderate`, or `off`; defaults to `moderate`). Region values use
+the `country-language` format supported by `ddgs`, for example `us-en` or `uk-en`.
+The response contains the original query, selected region and safe-search setting,
+provider source, result count, and results with `title`, `url`, `snippet`, and
+`source`. An empty result set returns HTTP 200 with `"count": 0` and `"results": []`.
+Invalid parameters return HTTP 400; provider rate limits return HTTP 429; timeouts
+return HTTP 504; other provider failures return HTTP 502. The endpoint also limits
+each client IP to 30 requests per minute and caches successful responses. Diagnostics
+identify the package version, selected backend, and unofficial integration status;
+they do not guarantee current upstream availability.
+
+`ddgs` 9.16.1 supports Python 3.10–3.14. It is an unofficial integration that may be
+rate-limited or disrupted by changes to DuckDuckGo; search availability is not
+guaranteed. Ensure deployment hosts can reach the provider.
 
 ## Authentication
 
